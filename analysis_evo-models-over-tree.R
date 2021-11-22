@@ -2,90 +2,121 @@ library(ape)
 library(phytools)
 library(paleotree)
 library(geiger)
+library(parallel)
+library(foreach)
+# library(iterators)
+library(doParallel)
 library(ggplot2)
 
 # day <- as.Date(date(), format="%a %b %d %H:%M:%S %Y")
 
-# TODO 
-# Reformat trait dataframe so 1 row per species (rownames = species) and
-# 1 column per time step, with each species' mean (or preferred) temperature
-# Then evo models will independently fit to each time step as if separate trait
-
 # Format phylo ------------------------------------------------------------
 # this code chunk is copied from analysis_phylo_eco.R, ForamNiches repo
-data(macroperforateForam)
 
-# 2 species are assigned to a different genus in the phylogeny
-foramAMb$Species_name <- gsub('Globigerinoides_sacculifer', 'Trilobatus_sacculifer', 
-                              foramAMb$Species_name)
-foramAMb$Species_name <- gsub('Globigerinoides_trilobus', 'Trilobatus_trilobus', 
-                              foramAMb$Species_name)
+# data(macroperforateForam)
+# 
+# # 2 species are assigned to a different genus in the phylogeny
+# foramAMb$Species_name <- gsub('Globigerinoides_sacculifer', 'Trilobatus_sacculifer', 
+#                               foramAMb$Species_name)
+# foramAMb$Species_name <- gsub('Globigerinoides_trilobus', 'Trilobatus_trilobus', 
+#                               foramAMb$Species_name)
+# 
+# # from paleotree example: convert Aze et al's suppmat to paleotree-readable format
+# createTaxaData <- function(table){
+#   #reorder table by first appearance
+#   timetable <- table[order(-as.numeric(table[,3])),]
+#   ID <- 1:nrow(table)
+#   anc <- sapply(table[,2], function(x){
+#     if(!is.na(x)){
+#       which(x == table[,1])
+#     } else { NA }
+#   })
+#   stillAlive <- as.numeric(table[,4] == 0)
+#   ages <- cbind(as.numeric(table[,3]),
+#                 as.numeric(table[,4]))
+#   res <- cbind(ID,anc,ages,stillAlive,ID)
+#   colnames(res) <- c('taxon.id','ancestor.id','orig.time',
+#                      'ext.time','still.alive','looks.like')
+#   rownames(res) <- table[,1]
+#   return(res)
+# }
+# 
+# # warning: slow!
+# taxaAMb <- createTaxaData(foramAMb)
+# treeAMb <- taxa2phylo(taxaAMb)
+# 
+# # drop anagenetic zero-length-terminal-edge ancestors
+# phyloFull <- dropZLB(treeAMb)
+# 
+# # rename tips from alphanumeric codes to species names
+# sppCodes <- phyloFull$tip.label
+# rowOrdr <- match(sppCodes, foramAMb$Species_code)
+# phyloFull$tip.label <- foramAMb$Species_name[rowOrdr]
+# 
+# saveRDS(phyloFull, 'Data/Aze-tree-phylo-object.rds')
 
-# from paleotree example: convert Aze et al's suppmat to paleotree-readable format
-createTaxaData <- function(table){
-  #reorder table by first appearance
-  timetable <- table[order(-as.numeric(table[,3])),]
-  ID <- 1:nrow(table)
-  anc <- sapply(table[,2], function(x){
-    if(!is.na(x)){
-      which(x == table[,1])
-    } else { NA }
-  })
-  stillAlive <- as.numeric(table[,4] == 0)
-  ages <- cbind(as.numeric(table[,3]),
-                as.numeric(table[,4]))
-  res <- cbind(ID,anc,ages,stillAlive,ID)
-  colnames(res) <- c('taxon.id','ancestor.id','orig.time',
-                     'ext.time','still.alive','looks.like')
-  rownames(res) <- table[,1]
-  return(res)
-}
-
-# warning: slow!
-taxaAMb <- createTaxaData(foramAMb)
-treeAMb <- taxa2phylo(taxaAMb)
-
-# drop anagenetic zero-length-terminal-edge ancestors
-cleanAMb <- dropZLB(treeAMb)
-
-# rename tips from alphanumeric codes to species names
-sppCodes <- cleanAMb$tip.label
-rowOrdr <- match(sppCodes, foramAMb$Species_code)
-cleanAMb$tip.label <- foramAMb$Species_name[rowOrdr]
+phyloFull <- readRDS('Data/Aze-tree-phylo-object.rds')
 
 # Format trait data -------------------------------------------------------
 
-# get spp's mean occupied temperature from a given time bin (e.g. most recent)
-bin <- 4
-
 df <- read.csv('Data/niche-sumry-metrics_SJ-ste_SS_2020-11-15.csv')
-binBool <- df$bin == bin
-dfTips <- df[binBool,]
+df$sp <- gsub(' ', '_', df$sp)
 
-# Ensure uniform species name set in data and tree
-dfTips$sp <- gsub(' ', '_', dfTips$sp)
-toss <- name.check(cleanAMb, dfTips$sp, data.names = dfTips$sp)
-noPhy <- toss$data_not_tree
+# restrict to last 2 glacial intervals
+maxAge <- 156
+inSpan <- df$bin <= maxAge
+df <- df[inSpan,]
+bins <- sort(unique(df$bin))
+
+# remove 2 species not in phylogeny
+toss <- name.check(phyloFull, df$sp, data.names = df$sp)
+noPhy <- unique(toss$data_not_tree)
+paste(paste(noPhy, collapse = ' '), 'not in tree')
+# [1] "Globigerinita_glutinata Neogloboquadrina_incompta not in tree"
 if (length(noPhy) > 0){
-  rows2toss <- dfTips$sp %in% noPhy
-  dfTips <- dfTips[!rows2toss,]
-  paste(paste(noPhy, collapse = ' '), 'removed')
-} 
-trTrim <- drop.tip(cleanAMb, toss$tree_not_data)
-#  dropPaleoTip(treeAMb, toss$tree_not_data)
-name.check(trTrim, dfTips$sp, data.names = dfTips$sp)
+  rows2toss <- df$sp %in% noPhy
+  df <- df[!rows2toss,]
+}
+spp <- unique(df$sp)
+
+# extract mean occupied temperatures from a given time bin (e.g. most recent)
+getTips <- function(df, bin, tr, nSpp, binNm, trtNm, spNm){
+  binBool <- df[, binNm] == bin
+  dfTips <- df[binBool,]
+  nSamp <- nrow(dfTips)
+  if (nSamp < nSpp){
+    return(NULL)
+    # throw error instead?
+  } else {
+    trait <- dfTips[, trtNm]
+    names(trait) <- dfTips[, spNm]
+    return(trait)
+  }
+}
+# test <- getTips(bin = 4, df = df, tr = phyloFull, nSpp = length(spp),
+#   binNm = 'bin', trtNm = 'm', spNm = 'sp')
+
+# make list object, vector of sp traits per bin
+tipLall <- sapply(bins, FUN = getTips,
+               df = df, tr = phyloFull, nSpp = length(spp),
+               binNm = 'bin', trtNm = 'm', spNm = 'sp')
+names(tipLall) <- paste(bins)
+# bin 52 is missing Globigerinoides_conglobatus
+# bin 156 is missing Beella_digitata
+tipL <- Filter(Negate(is.null), tipLall)
 
 # Estimate params ---------------------------------------------------------
 
-trait <- dfTips$m
-names(trait) <- dfTips$sp
+#TODO
+# wrap this section into a function
+# apply function over list of trait data by time bin
 
-brownFit  <- fitContinuous(cleanAMb, trait, model = 'BM')
-lambdaFit <- fitContinuous(cleanAMb, trait, model = 'lambda')
-deltaFit  <- fitContinuous(cleanAMb, trait, model = 'delta')
-kappaFit  <- fitContinuous(cleanAMb, trait, model = 'kappa')
-ouFit     <- fitContinuous(cleanAMb, trait, model = 'OU')
-ebFit     <- fitContinuous(cleanAMb, trait, model = 'EB')
+brownFit  <- fitContinuous(phyloFull, trait, model = 'BM')
+lambdaFit <- fitContinuous(phyloFull, trait, model = 'lambda')
+deltaFit  <- fitContinuous(phyloFull, trait, model = 'delta')
+kappaFit  <- fitContinuous(phyloFull, trait, model = 'kappa')
+ouFit     <- fitContinuous(phyloFull, trait, model = 'OU')
+ebFit     <- fitContinuous(phyloFull, trait, model = 'EB')
 
 # alt to estimate Pagel's lambda: 
 # use nlme method - caper oddly drops 8 tree tips
@@ -115,6 +146,8 @@ sort(aicDelta)
 # bin = 100
 # > OU        delta     lambda    BM        kappa     EB 
 # > 0.0000000 0.7308084 0.9828120 2.2013227 4.1862505 4.2014246
+
+# Figures -----------------------------------------------------------------
 
 # Phylogenetic Comparative Methods p. 91:
 # There are two main ways to assess the fit of the three Pagel-style models to data.
@@ -171,7 +204,7 @@ barStack +
   theme(legend.position = 'null')
 dev.off()
 
-# fastAnc(cleanAMb, trait)
+# fastAnc(phyloFull, trait)
 
 # 4 ka parameters
   # > ouFit$opt$z0
