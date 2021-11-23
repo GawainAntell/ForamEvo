@@ -6,9 +6,13 @@ library(parallel)
 library(foreach)
 # library(iterators)
 library(doParallel)
+library(tidyr)
 library(ggplot2)
 
-# day <- as.Date(date(), format="%a %b %d %H:%M:%S %Y")
+day <- as.Date(date(), format="%a %b %d %H:%M:%S %Y")
+
+# TODO
+# set option to use SS or within-habitat data
 
 # Format phylo ------------------------------------------------------------
 # this code chunk is copied from analysis_phylo_eco.R, ForamNiches repo
@@ -46,16 +50,22 @@ library(ggplot2)
 # treeAMb <- taxa2phylo(taxaAMb)
 # 
 # # drop anagenetic zero-length-terminal-edge ancestors
-# phyloFull <- dropZLB(treeAMb)
+# phyFull <- dropZLB(treeAMb)
 # 
 # # rename tips from alphanumeric codes to species names
-# sppCodes <- phyloFull$tip.label
+# sppCodes <- phyFull$tip.label
 # rowOrdr <- match(sppCodes, foramAMb$Species_code)
-# phyloFull$tip.label <- foramAMb$Species_name[rowOrdr]
+# phyFull$tip.label <- foramAMb$Species_name[rowOrdr]
 # 
-# saveRDS(phyloFull, 'Data/Aze-tree-phylo-object.rds')
+# saveRDS(phyFull, 'Data/Aze-tree-phylo-object.rds')
 
-phyloFull <- readRDS('Data/Aze-tree-phylo-object.rds')
+phyFull <- readRDS('Data/Aze-tree-phylo-object.rds')
+
+# export figure for phylogeny of study species
+  # png('Figs/phylo_black.png', 
+  #     width = 7.5, height = 7.5, units = 'in', res = 300)
+  # plot.phylo(trTrim, main = '')
+  # dev.off()
 
 # Format trait data -------------------------------------------------------
 
@@ -69,7 +79,7 @@ df <- df[inSpan,]
 bins <- sort(unique(df$bin))
 
 # remove 2 species not in phylogeny
-toss <- name.check(phyloFull, df$sp, data.names = df$sp)
+toss <- name.check(phyFull, df$sp, data.names = df$sp)
 noPhy <- unique(toss$data_not_tree)
 paste(paste(noPhy, collapse = ' '), 'not in tree')
 # [1] "Globigerinita_glutinata Neogloboquadrina_incompta not in tree"
@@ -79,8 +89,11 @@ if (length(noPhy) > 0){
 }
 spp <- unique(df$sp)
 
+# drop tips not sampled in niche data
+phyTrim <- keep.tip(phyFull, spp)
+
 # extract mean occupied temperatures from a given time bin (e.g. most recent)
-getTips <- function(df, bin, tr, nSpp, binNm, trtNm, spNm){
+getTips <- function(df, bin, nSpp, binNm, trtNm, spNm){
   binBool <- df[, binNm] == bin
   dfTips <- df[binBool,]
   nSamp <- nrow(dfTips)
@@ -93,12 +106,12 @@ getTips <- function(df, bin, tr, nSpp, binNm, trtNm, spNm){
     return(trait)
   }
 }
-# test <- getTips(bin = 4, df = df, tr = phyloFull, nSpp = length(spp),
+# test <- getTips(bin = 4, df = df, nSpp = length(spp),
 #   binNm = 'bin', trtNm = 'm', spNm = 'sp')
 
 # make list object, vector of sp traits per bin
 tipLall <- sapply(bins, FUN = getTips,
-               df = df, tr = phyloFull, nSpp = length(spp),
+               df = df, nSpp = length(spp),
                binNm = 'bin', trtNm = 'm', spNm = 'sp')
 names(tipLall) <- paste(bins)
 # bin 52 is missing Globigerinoides_conglobatus
@@ -107,47 +120,37 @@ tipL <- Filter(Negate(is.null), tipLall)
 
 # Estimate params ---------------------------------------------------------
 
-#TODO
-# wrap this section into a function
-# apply function over list of trait data by time bin
+fitEvoMods <- function(phy, trt){
+  brownFit  <- fitContinuous(phy, trt, model = 'BM')
+  lambdaFit <- fitContinuous(phy, trt, model = 'lambda')
+  deltaFit  <- fitContinuous(phy, trt, model = 'delta')
+  kappaFit  <- fitContinuous(phy, trt, model = 'kappa')
+  ouFit     <- fitContinuous(phy, trt, model = 'OU')
+  ebFit     <- fitContinuous(phy, trt, model = 'EB')
 
-brownFit  <- fitContinuous(phyloFull, trait, model = 'BM')
-lambdaFit <- fitContinuous(phyloFull, trait, model = 'lambda')
-deltaFit  <- fitContinuous(phyloFull, trait, model = 'delta')
-kappaFit  <- fitContinuous(phyloFull, trait, model = 'kappa')
-ouFit     <- fitContinuous(phyloFull, trait, model = 'OU')
-ebFit     <- fitContinuous(phyloFull, trait, model = 'EB')
+  # compare all models as AIC weights
+  modL <- list(BM = brownFit, 
+               lambda = lambdaFit, 
+               delta = deltaFit,
+               kappa = kappaFit, 
+               OU = ouFit, 
+               EB = ebFit
+  )
+  getAic <- function(mod){ mod$opt$aic }
+  aicVect <- unlist(lapply(modL, getAic))
+  aicMin <- aicVect[which.min(aicVect)]
+  bestMod <- names(aicMin)
+  aicDelta <- aicVect - aicMin
+  relLik <- exp(-0.5 * aicDelta)
+  wts <- relLik/sum(relLik)
+  
+  data.frame(bestMod, t(wts))
+}
+# fitEvoMods(phy = phyTrim, trt = tipL[[10]]) # test
 
-# alt to estimate Pagel's lambda: 
-# use nlme method - caper oddly drops 8 tree tips
-  # pgl <- corPagel(1, form = ~ species, trTrim)
-  # pglMod <- gls(h ~ eco, data = spDf, correlation = pgl)
-  # summary(pglMod)
-
-# compare all models
-modL <- list(BM = brownFit, 
-             lambda = lambdaFit, 
-             delta = deltaFit,
-             kappa = kappaFit, 
-             OU = ouFit, 
-             EB = ebFit
-             )
-getAic <- function(mod){ mod$opt$aic }
-aicVect <- unlist(lapply(modL, getAic))
-
-aicMin <- aicVect[which.min(aicVect)]
-aicDelta <- aicVect - aicMin
-sort(aicDelta)
-
-# bin = 4
-# > OU        lambda    delta     BM        kappa     EB 
-# > 0.0000000 0.7616984 1.3060017 2.9660730 4.9409742 4.9661791 
-
-# bin = 100
-# > OU        delta     lambda    BM        kappa     EB 
-# > 0.0000000 0.7308084 0.9828120 2.2013227 4.1862505 4.2014246
-
-# Figures -----------------------------------------------------------------
+modsL <- lapply(tipL, fitEvoMods, phy = phyTrim)
+# 1.4 min runtime
+# delta and kappa models give many warnings of parameter estimates at bounds
 
 # Phylogenetic Comparative Methods p. 91:
 # There are two main ways to assess the fit of the three Pagel-style models to data.
@@ -162,79 +165,71 @@ sort(aicDelta)
 # distributions of parameter values, then inspect those distributions to see if they
 # overlap with values of interest (say, 0 or 1).
 
-# calculate weights and plot as bar chart
-relLik <- exp(-0.5*aicDelta)
-wts <- relLik/sum(relLik)
-sort(wts, decreasing = T)
+# fastAnc(phyFull, trait)
 
-# figure - save wts for each bin as objects wts4 and wts100 (see note at top for edit)
-dfWts <- data.frame(wts4, wts700)
-dfWts$mod <- row.names(dfWts)
+# Relative model support --------------------------------------------------
+# stacked bar chart of support for each evo model, for each tip time step
 
-modOrdr <- names(sort(wts4,decreasing = T))
-bar4 <- 
-  ggplot(data = dfWts) +
-  theme_minimal() +
-  scale_x_discrete(limits = c(modOrdr)) +
-  theme(axis.title = element_blank()) +
-  geom_bar(aes(x = mod, y = wts4), stat = 'identity')
+modsDf <- do.call(rbind, modsL)
+mods <- colnames(modsDf)[-1]
+modsDf$bin <- as.numeric(row.names(modsDf))
+modsLong <- pivot_longer(modsDf, cols = all_of(mods),
+                         names_to = 'Model', values_to = 'Weight')
+modsLong$Model <- as.factor(modsLong$Model)
+levels(modsLong$Model) <- mods
 
-png('Figs/evo-mod-wts_4ka.png',
-    width = 4, height = 4, units = 'in', res = 300)
-bar4 + 
-  scale_fill_manual(values=c('grey30','#FAA003'))
-dev.off()
-
-library(tidyr)
-modLong <- pivot_longer(dfWts, cols = starts_with('wts'), 
-                        names_to = 'TipAge', values_to = 'weight')
+# colr <- c('BM' = '#283593', 
+#           'lambda' = '#5dade2', 
+#           'delta' = '#FFC300', 
+#           'kappa' = '#FF5733',
+#           'OU' = '#000000',
+#           'EB' = '#57de36')
 
 barStack <- 
-  ggplot(modLong) +
+  ggplot() +
   theme_minimal() +
-  scale_x_discrete(limits = c(modOrdr)) +
-  theme(axis.title = element_blank()) +
-  geom_bar(aes(x = mod, y = weight, fill = TipAge), 
+  # use position=fill to indicate data as %, so rounding errors don't result in sum > 1
+  geom_bar(data = modsLong, aes(x = bin, y = Weight, fill = Model), 
            stat = 'identity',
-           position = position_dodge())
-png('Figs/evo-mod-wts_4-vs-700ka.png',
-    width = 4, height = 4, units = 'in', res = 300)
-barStack +
-  scale_fill_manual(values=c('grey30','#FAA003')) +
-  theme(legend.position = 'null')
+           position = 'fill'
+          # width = 0.75
+           ) +
+  scale_x_discrete(name = 'Tip age (ka)',
+                   labels = modsLong$bin) +
+  scale_y_continuous(name = 'Model support (AIC weight)        ') +
+#                    expand = c(0, 0), limits = c(0, 1.2),
+#                    breaks = seq(0, 1, by = 0.25)) +
+  theme(legend.position = 'top',
+        legend.text = element_text(size = 8),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+        axis.ticks.x = element_line(size = 0.5, colour = 'grey30'),
+        axis.ticks.length = unit(4, "pt"),
+        axis.text.y = element_text(),
+        panel.grid = element_blank()
+  )
+#   scale_colour_manual(name = element_blank(), values = colr, 
+#                       aesthetics = 'fill', limits = evoModes,
+#                       labels = c('Strict stasis','Stasis',
+#                                  'Random walk','Directional walk',
+#                                  'Tracking')) +
+#   guides(fill = guide_legend(nrow = 2))
+
+# manually label the time bins and rotate to vertical axis
+binLbl <- head(bins, -1)
+barsFlip <- 
+  barStack +
+  geom_text(aes(x = rev(binLbl), y = -.01, label = binLbl),
+            hjust = 1, size = 3.2) +
+  coord_flip()
+
+# if (ss){
+  barNm <- paste0('Figs/phylo-evo-model-support-barplot_SS_', day, '.pdf')
+# } else {
+#   barNm <- paste0('Figs/evo-model-support-barplot_hab_',day,'.pdf')
+# }
+pdf(barNm, width = 4, height = 6)
+  barsFlip
 dev.off()
-
-# fastAnc(phyloFull, trait)
-
-# 4 ka parameters
-  # > ouFit$opt$z0
-  # [1] 21.81366
-  # > ouFit$opt$alpha
-  # [1] 0.07985
-
-# 28 ka parameters
-  # > ouFit$opt$z0
-  # [1] 17.86773
-  # > ouFit$opt$alpha
-  # [1] 0.12269
-
-# 100 ka parameters
-  # > ouFit$opt$z0
-  # [1] 18.7577
-  # > ouFit$opt$alpha
-  # [1] 0.05753173
-
-# 700 ka parameters
-  # > ouFit$opt$z0
-  # [1] 20.72465
-  # $alpha
-  # [1] 0.1899055
-
-png('Figs/phylo_black.png', 
-    width = 7.5, height = 7.5, units = 'in', res = 300)
-plot.phylo(trTrim, main = '')
-dev.off()
-         
 
 # Example code ------------------------------------------------------------
 
