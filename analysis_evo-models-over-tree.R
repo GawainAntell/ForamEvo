@@ -4,15 +4,15 @@ library(paleotree)
 library(geiger)
 library(parallel)
 library(foreach)
-# library(iterators)
+library(iterators)
 library(doParallel)
 library(tidyr)
 library(ggplot2)
 
 day <- as.Date(date(), format="%a %b %d %H:%M:%S %Y")
 
-# TODO
-# set option to use SS or within-habitat data
+# set whether to run analyses on surface-level or in-habitat niches
+ss <- TRUE
 
 # Format phylo ------------------------------------------------------------
 # this code chunk is copied from analysis_phylo_eco.R, ForamNiches repo
@@ -69,7 +69,12 @@ phyFull <- readRDS('Data/Aze-tree-phylo-object.rds')
 
 # Format trait data -------------------------------------------------------
 
-df <- read.csv('Data/niche-sumry-metrics_SJ-ste_SS_2020-11-15.csv')
+if (ss){
+  df <- read.csv('Data/niche-sumry-metrics_SJ-ste_SS_2020-11-15.csv')
+} else {
+  df <- read.csv('Data/niche-sumry-metrics_SJ-ste_hab_2020-11-15.csv')
+}
+
 df$sp <- gsub(' ', '_', df$sp)
 
 # restrict to last 2 glacial intervals
@@ -93,30 +98,78 @@ spp <- unique(df$sp)
 phyTrim <- keep.tip(phyFull, spp)
 
 # extract mean occupied temperatures from a given time bin (e.g. most recent)
-getTips <- function(df, bin, nSpp, binNm, trtNm, spNm){
+# give data for all species that are available
+# print details of what isn't available, to be dealt with separately later
+getTips <- function(df, bin, spp, binNm, trtNm, spNm){
   binBool <- df[, binNm] == bin
   dfTips <- df[binBool,]
   nSamp <- nrow(dfTips)
-  if (nSamp < nSpp){
-    return(NULL)
-    # throw error instead?
-  } else {
-    trait <- dfTips[, trtNm]
-    names(trait) <- dfTips[, spNm]
-    return(trait)
+  if (nSamp < length(spp)){
+    notSamp <- setdiff(spp, dfTips[, spNm])
+    print(paste(bin, notSamp))
   }
+  trait <- dfTips[, trtNm]
+  names(trait) <- dfTips[, spNm]
+  return(trait)
 }
-# test <- getTips(bin = 4, df = df, nSpp = length(spp),
+# test <- getTips(bin = 52, df = df, spp = spp,
 #   binNm = 'bin', trtNm = 'm', spNm = 'sp')
 
-# make list object, vector of sp traits per bin
-tipLall <- sapply(bins, FUN = getTips,
-               df = df, nSpp = length(spp),
-               binNm = 'bin', trtNm = 'm', spNm = 'sp')
+# vector of sp traits per bin, synchronous across spp and in chronological order
+tipLall <- sapply(bins, FUN = getTips, df = df, spp = spp,
+                  binNm = 'bin', trtNm = 'm', spNm = 'sp')
 names(tipLall) <- paste(bins)
-# bin 52 is missing Globigerinoides_conglobatus
-# bin 156 is missing Beella_digitata
-tipL <- Filter(Negate(is.null), tipLall)
+# don't use bins missing spp for trait models; need same spp for fair comparisons
+# [1] "52 Globigerinoides_conglobatus"
+# [1] "156 Beella_digitata"
+tipLchron <- Filter( function(x){ 
+  length(x) == length(spp) 
+  }, 
+  tipLall)
+
+# Randomly sample tips ----------------------------------------------------
+
+# for each species, randomly pick a time bin at which to measure its trait
+sampleTips <- function(pool, sppVect, binL){
+  tipSamp <- sample(pool, length(sppVect), replace = TRUE)
+  names(tipSamp) <- sppVect
+  getVal <- function(s){
+    spBin <- tipSamp[s]
+    binL[[spBin]][s]
+  }
+  valVect <- sapply(sppVect, getVal)
+  names(valVect) <- sppVect
+  valVect
+}
+
+# set how many times to iterate the random sampling of tips:
+n <- 10
+
+# names (character) of time bins with available data to serve as tips
+# use whole time interval except for B digitata and G conglobatus
+tipPoolAll <- names(tipLall)
+tipPoolBd <- tipPoolAll[tipPoolAll != 156]
+tipPoolGc <- tipPoolAll[tipPoolAll != 52]
+
+mostSpp <- spp[! spp %in% c('Beella_digitata', 'Globigerinoides_conglobatus')]
+
+# customize sampling pools for species unsampled in some time bins, 
+# but combine into one sample for analysis
+sampleAvlbTips <- function(restSpp, poolBd, poolGc, poolAll, binL){
+  sampBd <-   sampleTips(poolBd, 'Beella_digitata', binL)
+  sampGc <-   sampleTips(poolGc, 'Globigerinoides_conglobatus', binL)
+  sampRest <- sampleTips(poolAll, restSpp, binL)
+  c(sampRest, sampBd, sampGc)
+}
+
+tipLrdm <- replicate(n = n,
+                     sampleAvlbTips(restSpp = mostSpp,
+                                    poolBd  = tipPoolBd,
+                                    poolGc  = tipPoolGc,
+                                    poolAll = tipPoolAll,
+                                    binL = tipLall),
+                     simplify = FALSE
+                     )
 
 # Estimate params ---------------------------------------------------------
 
@@ -146,11 +199,16 @@ fitEvoMods <- function(phy, trt){
   
   data.frame(bestMod, t(wts))
 }
-# fitEvoMods(phy = phyTrim, trt = tipL[[10]]) # test
+# fitEvoMods(phy = phyTrim, trt = tipLchron[[10]]) # test
 
-modsL <- lapply(tipL, fitEvoMods, phy = phyTrim)
+modsLchron <- lapply(tipLchron, fitEvoMods, phy = phyTrim)
+modsDfChron <- do.call(rbind, modsLchron)
 # 1.4 min runtime
-# delta and kappa models give many warnings of parameter estimates at bounds
+# delta and kappa models give 40 warnings of parameter estimates at bounds
+
+modsLrdm <- lapply(tipLrdm, fitEvoMods, phy = phyTrim)
+# delta, kappa, and EB models warn parameter estimates at bounds (x22)
+modsDfRdm <- do.call(rbind, modsLrdm)
 
 # Phylogenetic Comparative Methods p. 91:
 # There are two main ways to assess the fit of the three Pagel-style models to data.
@@ -170,13 +228,12 @@ modsL <- lapply(tipL, fitEvoMods, phy = phyTrim)
 # Relative model support --------------------------------------------------
 # stacked bar chart of support for each evo model, for each tip time step
 
-modsDf <- do.call(rbind, modsL)
-mods <- colnames(modsDf)[-1]
-modsDf$bin <- as.numeric(row.names(modsDf))
-modsLong <- pivot_longer(modsDf, cols = all_of(mods),
+mods <- colnames(modsDfChron)[-1]
+modsDfChron$bin <- as.numeric(row.names(modsDfChron))
+modsLong <- pivot_longer(modsDfChron, cols = all_of(mods),
                          names_to = 'Model', values_to = 'Weight')
 modsLong$Model <- as.factor(modsLong$Model)
-levels(modsLong$Model) <- mods
+# levels(modsLong$Model) <- mods
 
 # colr <- c('BM' = '#283593', 
 #           'lambda' = '#5dade2', 
@@ -222,11 +279,11 @@ barsFlip <-
             hjust = 1, size = 3.2) +
   coord_flip()
 
-# if (ss){
-  barNm <- paste0('Figs/phylo-evo-model-support-barplot_SS_', day, '.pdf')
-# } else {
-#   barNm <- paste0('Figs/evo-model-support-barplot_hab_',day,'.pdf')
-# }
+if (ss){
+  barNm <- paste0('Figs/phylo-evo-model-support-barplot_SS_',  day, '.pdf')
+} else {
+  barNm <- paste0('Figs/phylo-evo-model-support-barplot_hab_', day, '.pdf')
+}
 pdf(barNm, width = 4, height = 6)
   barsFlip
 dev.off()
