@@ -8,6 +8,7 @@ library(iterators)
 library(doParallel)
 library(tidyr)
 library(ggplot2)
+library(xtable)
 
 day <- as.Date(date(), format="%a %b %d %H:%M:%S %Y")
 
@@ -225,15 +226,20 @@ modsDfRdm <- do.call(rbind, modsLrdm)
 
 # fastAnc(phyFull, trait)
 
-# Relative model support --------------------------------------------------
+# Charts for chronological sampling ---------------------------------------
+
 # stacked bar chart of support for each evo model, for each tip time step
 
+# plot youngest time step at top (strat order)
+# this means putting df in reverse order, to be flipped during xy rotation later
 mods <- colnames(modsDfChron)[-1]
-modsDfChron$bin <- as.numeric(row.names(modsDfChron))
+binsInPlot <- row.names(modsDfChron)
+modsDfChron$bin <- factor(binsInPlot, levels = rev(binsInPlot)) 
+# (bins shouldn't be numeric since plotted as discrete axis)
+
 modsLong <- pivot_longer(modsDfChron, cols = all_of(mods),
                          names_to = 'Model', values_to = 'Weight')
-modsLong$Model <- as.factor(modsLong$Model)
-# levels(modsLong$Model) <- mods
+modsLong$Model <- factor(modsLong$Model, levels = rev(mods))
 
 # colr <- c('BM' = '#283593', 
 #           'lambda' = '#5dade2', 
@@ -248,36 +254,32 @@ barStack <-
   # use position=fill to indicate data as %, so rounding errors don't result in sum > 1
   geom_bar(data = modsLong, aes(x = bin, y = Weight, fill = Model), 
            stat = 'identity',
-           position = 'fill'
-          # width = 0.75
+           position = 'fill',
+           width = 0.85
            ) +
   scale_x_discrete(name = 'Tip age (ka)',
-                   labels = modsLong$bin) +
+                   labels = rev(binsInPlot)) +
   scale_y_continuous(name = 'Model support (AIC weight)        ') +
 #                    expand = c(0, 0), limits = c(0, 1.2),
-#                    breaks = seq(0, 1, by = 0.25)) +
+#                    breaks = seq(0, 1, by = 0.25)) + # auto breaks in right posion
   theme(legend.position = 'top',
         legend.text = element_text(size = 8),
+        axis.text.y = element_text(margin = margin(r = -10)),
         axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
         axis.ticks.x = element_line(size = 0.5, colour = 'grey30'),
         axis.ticks.length = unit(4, "pt"),
-        axis.text.y = element_text(),
         panel.grid = element_blank()
-  )
+  ) +
+  guides(fill = guide_legend(reverse = TRUE)
+    # fill = guide_legend(nrow = 2) # legend already 2 rows
+         ) +
+  coord_flip()
 #   scale_colour_manual(name = element_blank(), values = colr, 
 #                       aesthetics = 'fill', limits = evoModes,
 #                       labels = c('Strict stasis','Stasis',
 #                                  'Random walk','Directional walk',
 #                                  'Tracking')) +
-#   guides(fill = guide_legend(nrow = 2))
-
-# manually label the time bins and rotate to vertical axis
-binLbl <- head(bins, -1)
-barsFlip <- 
-  barStack +
-  geom_text(aes(x = rev(binLbl), y = -.01, label = binLbl),
-            hjust = 1, size = 3.2) +
-  coord_flip()
+#   
 
 if (ss){
   barNm <- paste0('Figs/phylo-evo-model-support-barplot_SS_',  day, '.pdf')
@@ -285,8 +287,29 @@ if (ss){
   barNm <- paste0('Figs/phylo-evo-model-support-barplot_hab_', day, '.pdf')
 }
 pdf(barNm, width = 4, height = 6)
-  barsFlip
+  barStack
 dev.off()
+
+# export the model support for each time bin as a suppl table:
+# some values are too similar to compare easily form the barplot alone
+
+# last column is the time bin identifier; use rownames instead to put it 1st
+wdthDf <- ncol(modsDfChron)
+
+chronTbl <- xtable(modsDfChron[,-wdthDf], align = rep('r', wdthDf), digits = 3,
+               caption = 'Trait evolution model weights by time bin')
+if (ss){
+  tblNm <- paste0('Figs/phylo-evo-model-weights_chron_SS_',  day, '.tex')
+} else {
+  tblNm <- paste0('Figs/phylo-evo-model-weights_chron_hab_', day, '.tex')
+}
+if (ss){
+  print(chronTbl, file = tblNm, include.rownames = TRUE,
+        caption.placement = 'top')
+} else {
+  print(chronTbl, file = tblNm, include.rownames = TRUE,
+        caption.placement = 'top')
+}
 
 # Example code ------------------------------------------------------------
 
