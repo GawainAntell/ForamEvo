@@ -8,6 +8,7 @@ library(iterators)
 library(doParallel)
 library(tidyr)
 library(ggplot2)
+library(RColorBrewer)
 library(xtable)
 
 day <- as.Date(date(), format="%a %b %d %H:%M:%S %Y")
@@ -144,7 +145,7 @@ sampleTips <- function(pool, sppVect, binL){
 }
 
 # set how many times to iterate the random sampling of tips:
-n <- 10
+n <- 1000
 
 # names (character) of time bins with available data to serve as tips
 # use whole time interval except for B digitata and G conglobatus
@@ -205,11 +206,19 @@ fitEvoMods <- function(phy, trt){
 modsLchron <- lapply(tipLchron, fitEvoMods, phy = phyTrim)
 modsDfChron <- do.call(rbind, modsLchron)
 # 1.4 min runtime
-# delta and kappa models give 40 warnings of parameter estimates at bounds
+# delta and kappa models give many warnings of parameter estimates at bounds
 
-modsLrdm <- lapply(tipLrdm, fitEvoMods, phy = phyTrim)
-# delta, kappa, and EB models warn parameter estimates at bounds (x22)
-modsDfRdm <- do.call(rbind, modsLrdm)
+pt1 <- proc.time()
+nCore <- detectCores() - 1
+registerDoParallel(nCore)
+modsDfRdm <- foreach(trt = tipLrdm, .packages = 'geiger',
+                     .combine = rbind, .inorder = FALSE) %dopar%
+  fitEvoMods(phy = phyTrim, trt = trt)
+stopImplicitCluster()
+pt2 <- proc.time()
+(pt2-pt1)/60 # about 2 min runtime for 100 reps
+
+# delta, kappa, and EB models warn parameter estimates at bounds
 
 # Phylogenetic Comparative Methods p. 91:
 # There are two main ways to assess the fit of the three Pagel-style models to data.
@@ -241,12 +250,9 @@ modsLong <- pivot_longer(modsDfChron, cols = all_of(mods),
                          names_to = 'Model', values_to = 'Weight')
 modsLong$Model <- factor(modsLong$Model, levels = rev(mods))
 
-# colr <- c('BM' = '#283593', 
-#           'lambda' = '#5dade2', 
-#           'delta' = '#FFC300', 
-#           'kappa' = '#FF5733',
-#           'OU' = '#000000',
-#           'EB' = '#57de36')
+# colorblind friendly diverging palette
+colr <- brewer.pal(n = length(mods), name = "Dark2")
+names(colr) <- mods
 
 barStack <- 
   ggplot() +
@@ -273,13 +279,10 @@ barStack <-
   guides(fill = guide_legend(reverse = TRUE)
     # fill = guide_legend(nrow = 2) # legend already 2 rows
          ) +
+  scale_colour_manual(name = element_blank(), values = colr,
+                      aesthetics = 'fill', limits = rev(mods)
+                      ) +
   coord_flip()
-#   scale_colour_manual(name = element_blank(), values = colr, 
-#                       aesthetics = 'fill', limits = evoModes,
-#                       labels = c('Strict stasis','Stasis',
-#                                  'Random walk','Directional walk',
-#                                  'Tracking')) +
-#   
 
 if (ss){
   barNm <- paste0('Figs/phylo-evo-model-support-barplot_SS_',  day, '.pdf')
@@ -310,6 +313,52 @@ if (ss){
   print(chronTbl, file = tblNm, include.rownames = TRUE,
         caption.placement = 'top')
 }
+
+# Charts for random sampling ----------------------------------------------
+
+# summarize weight for each model across all sampling iterations
+
+# plot as barplot
+# (problem: SD and SE dependent on n iterations, better to report quartiles)
+  # dfSumry <- function(x){
+  #   c(mean = mean(x, na.rm=TRUE),
+  #     sd = sd(x, na.rm=TRUE))
+  # }
+  # rdmAvgM <- ( apply(modsDfRdm[,-1], 2, dfSumry) )
+  # rdmAvgDf <- data.frame(t(rdmAvgM))
+  # rdmAvgDf$Model <- rownames(rdmAvgDf)
+
+  # barAvg <- ggplot(data = rdmAvgDf) +
+  #   theme_minimal() +
+  #   geom_col(aes(x = Model, y = mean)) +
+  #   geom_errorbar(aes(x = Model, ymin = mean - sd, ymax = mean + sd), 
+  #                 width = 0.2)
+
+modsLongRdm <- pivot_longer(modsDfRdm, cols = all_of(mods),
+                         names_to = 'Model', values_to = 'Weight')
+modsLongRdm$Model <- factor(modsLongRdm$Model, levels = mods)
+
+# use same colour scheme as in stacked barplot figure
+# but no legend - would be redundant with x-axis labels
+wtBox <- ggplot() +
+  theme_minimal() +
+  geom_boxplot(data = modsLongRdm,
+               aes(x = Model, y = Weight),
+               fill = colr) +
+  scale_y_continuous('Model support (AIC Weight)') +
+  theme(axis.title.x = element_blank()) +
+  scale_colour_manual(name = element_blank(), values = colr,
+                      aesthetics = 'fill', limits = (mods)
+  )
+
+if (ss){
+  wtBoxNm <- paste0('Figs/phylo-evo-model-wts_random-samp_', n, 'x_SS_',  day, '.pdf')
+} else {
+  wtBoxNm <- paste0('Figs/phylo-evo-model-wts_random-samp_', n, 'x_hab_', day, '.pdf')
+}
+pdf(wtBoxNm, width = 4, height = 3)
+  wtBox
+dev.off()
 
 # Example code ------------------------------------------------------------
 
