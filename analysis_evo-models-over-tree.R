@@ -216,9 +216,16 @@ modsDfRdm <- foreach(trt = tipLrdm, .packages = 'geiger',
   fitEvoMods(phy = phyTrim, trt = trt)
 stopImplicitCluster()
 pt2 <- proc.time()
-(pt2-pt1)/60 # about 2 min runtime for 100 reps
-
+(pt2-pt1)/60 
 # delta, kappa, and EB models warn parameter estimates at bounds
+
+# ca 2 min runtime for 100 reps, 17 min/ 1000x, so save results to jump to plots
+if (ss){
+  rdmDfNm <- paste0('Figs/phylo-evo-model-wts_random-samp_', n, 'x_SS_',  day, '.csv')
+} else {
+  rdmDfNm <- paste0('Figs/phylo-evo-model-wts_random-samp_', n, 'x_hab_', day, '.csv')
+}
+write.csv(modsDfRdm, rdmDfNm, row.names = FALSE)
 
 # Phylogenetic Comparative Methods p. 91:
 # There are two main ways to assess the fit of the three Pagel-style models to data.
@@ -285,9 +292,9 @@ barStack <-
   coord_flip()
 
 if (ss){
-  barNm <- paste0('Figs/phylo-evo-model-support-barplot_SS_',  day, '.pdf')
+  barNm <- paste0('Figs/phylo-evo-model-wts-barplot_SS_',  day, '.pdf')
 } else {
-  barNm <- paste0('Figs/phylo-evo-model-support-barplot_hab_', day, '.pdf')
+  barNm <- paste0('Figs/phylo-evo-model-wts-barplot_hab_', day, '.pdf')
 }
 pdf(barNm, width = 4, height = 6)
   barStack
@@ -302,9 +309,9 @@ wdthDf <- ncol(modsDfChron)
 chronTbl <- xtable(modsDfChron[,-wdthDf], align = rep('r', wdthDf), digits = 3,
                caption = 'Trait evolution model weights by time bin')
 if (ss){
-  tblNm <- paste0('Figs/phylo-evo-model-weights_chron_SS_',  day, '.tex')
+  tblNm <- paste0('Figs/phylo-evo-model-wts_chron_SS_',  day, '.tex')
 } else {
-  tblNm <- paste0('Figs/phylo-evo-model-weights_chron_hab_', day, '.tex')
+  tblNm <- paste0('Figs/phylo-evo-model-wts_chron_hab_', day, '.tex')
 }
 if (ss){
   print(chronTbl, file = tblNm, include.rownames = TRUE,
@@ -335,7 +342,7 @@ if (ss){
   #                 width = 0.2)
 
 modsLongRdm <- pivot_longer(modsDfRdm, cols = all_of(mods),
-                         names_to = 'Model', values_to = 'Weight')
+                            names_to = 'Model', values_to = 'Weight')
 modsLongRdm$Model <- factor(modsLongRdm$Model, levels = mods)
 
 # use same colour scheme as in stacked barplot figure
