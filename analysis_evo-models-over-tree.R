@@ -77,6 +77,9 @@ if (ss){
   df <- read.csv('Data/niche-sumry-metrics_SJ-ste_hab_2020-11-15.csv')
 }
 
+# calculate standard error to input in trait models
+df$se <- df$sd / sqrt(df$n)
+
 df$sp <- gsub(' ', '_', df$sp)
 
 # restrict to last 2 glacial intervals
@@ -99,10 +102,10 @@ spp <- unique(df$sp)
 # drop tips not sampled in niche data
 phyTrim <- keep.tip(phyFull, spp)
 
-# extract mean occupied temperatures from a given time bin (e.g. most recent)
+# extract mean/SE occupied temperatures from a given time bin (e.g. most recent)
 # give data for all species that are available
 # print details of what isn't available, to be dealt with separately later
-getTips <- function(df, bin, spp, binNm, trtNm, spNm){
+getTips <- function(df, bin, spp, binNm, val1, val2, spNm){
   binBool <- df[, binNm] == bin
   dfTips <- df[binBool,]
   nSamp <- nrow(dfTips)
@@ -110,42 +113,47 @@ getTips <- function(df, bin, spp, binNm, trtNm, spNm){
     notSamp <- setdiff(spp, dfTips[, spNm])
     print(paste(bin, notSamp))
   }
-  trait <- dfTips[, trtNm]
-  names(trait) <- dfTips[, spNm]
-  return(trait)
+  dat1 <- dfTips[, val1]
+  dat2 <- dfTips[, val2]
+  names(dat1) <- names(dat2) <- dfTips[, spNm]
+  outL <- list(dat1, dat2)
+  names(outL) <- c(val1, val2)
+  return(outL)
 }
 # test <- getTips(bin = 52, df = df, spp = spp,
-#   binNm = 'bin', trtNm = 'm', spNm = 'sp')
+#   binNm = 'bin', val1 = 'm', val2 = 'se', spNm = 'sp')
 
-# vector of sp traits per bin, synchronous across spp and in chronological order
-tipLall <- sapply(bins, FUN = getTips, df = df, spp = spp,
-                  binNm = 'bin', trtNm = 'm', spNm = 'sp')
+# vector of sp m and SE per bin, synchronous across spp and in chronological order
+tipLall <- lapply(bins, FUN = getTips, df = df, spp = spp,
+                  binNm = 'bin', val1 = 'm', val2 = 'se', spNm = 'sp')
 names(tipLall) <- paste(bins)
 # don't use bins missing spp for trait models; need same spp for fair comparisons
 # [1] "52 Globigerinoides_conglobatus"
 # [1] "156 Beella_digitata"
+
 tipLchron <- Filter( function(x){ 
-  length(x) == length(spp) 
+  length(x[[1]]) == length(spp) 
   }, 
   tipLall)
 
 # Randomly sample tips ----------------------------------------------------
 
 # for each species, randomly pick a time bin at which to measure its trait
+  # testing: pool <- tipPoolAll; sppVect <- mostSpp; binL <- tipLall
 sampleTips <- function(pool, sppVect, binL){
   tipSamp <- sample(pool, length(sppVect), replace = TRUE)
   names(tipSamp) <- sppVect
   getVal <- function(s){
     spBin <- tipSamp[s]
-    binL[[spBin]][s]
+    spM  <- binL[[spBin]][['m' ]][s]
+    spSE <- binL[[spBin]][['se']][s]
+    cbind(spM, spSE)
   }
-  valVect <- sapply(sppVect, getVal)
-  names(valVect) <- sppVect
-  valVect
+  sapply(sppVect, getVal)
 }
 
 # set how many times to iterate the random sampling of tips:
-n <- 1000
+n <- 100
 
 # names (character) of time bins with available data to serve as tips
 # use whole time interval except for B digitata and G conglobatus
@@ -157,11 +165,13 @@ mostSpp <- spp[! spp %in% c('Beella_digitata', 'Globigerinoides_conglobatus')]
 
 # customize sampling pools for species unsampled in some time bins, 
 # but combine into one sample for analysis
+# output with same list structure as synchronous, chronological data
 sampleAvlbTips <- function(restSpp, poolBd, poolGc, poolAll, binL){
   sampBd <-   sampleTips(poolBd, 'Beella_digitata', binL)
   sampGc <-   sampleTips(poolGc, 'Globigerinoides_conglobatus', binL)
   sampRest <- sampleTips(poolAll, restSpp, binL)
-  c(sampRest, sampBd, sampGc)
+  sampMat <- cbind(sampRest, sampBd, sampGc)
+  list('m' = sampMat[1,], 'se' = sampMat[2,])
 }
 
 tipLrdm <- replicate(n = n,
@@ -175,16 +185,18 @@ tipLrdm <- replicate(n = n,
 
 # Estimate params ---------------------------------------------------------
 
-fitEvoMods <- function(phy, trt){
-  brownFit  <- fitContinuous(phy, trt, model = 'BM')
-  lambdaFit <- fitContinuous(phy, trt, model = 'lambda')
-  deltaFit  <- fitContinuous(phy, trt, model = 'delta')
-  kappaFit  <- fitContinuous(phy, trt, model = 'kappa')
-  ouFit     <- fitContinuous(phy, trt, model = 'OU')
-  ebFit     <- fitContinuous(phy, trt, model = 'EB')
-
+fitEvoMods <- function(phy, m, err){
+  whFit     <- fitContinuous(phy, m, err, model = 'white')
+  brownFit  <- fitContinuous(phy, m, err, model = 'BM')
+  lambdaFit <- fitContinuous(phy, m, err, model = 'lambda')
+  deltaFit  <- fitContinuous(phy, m, err, model = 'delta')
+  kappaFit  <- fitContinuous(phy, m, err, model = 'kappa')
+  ouFit     <- fitContinuous(phy, m, err, model = 'OU')
+  ebFit     <- fitContinuous(phy, m, err, model = 'EB')
+  
   # compare all models as AIC weights
-  modL <- list(BM = brownFit, 
+  modL <- list(white = whFit,
+               BM = brownFit, 
                lambda = lambdaFit, 
                delta = deltaFit,
                kappa = kappaFit, 
@@ -201,19 +213,20 @@ fitEvoMods <- function(phy, trt){
   
   data.frame(bestMod, t(wts))
 }
-# fitEvoMods(phy = phyTrim, trt = tipLchron[[10]]) # test
+# fitEvoMods(phy = phyTrim, m = tipLchron[[10]][['m']], err = tipLchron[[10]][['se']]) # test
 
-modsLchron <- lapply(tipLchron, fitEvoMods, phy = phyTrim)
+modsLchron <- lapply(tipLchron, function(x){
+  fitEvoMods(phy = phyTrim, m = x[['m']], err = x[['se']])
+  })
 modsDfChron <- do.call(rbind, modsLchron)
-# 1.4 min runtime
-# delta and kappa models give many warnings of parameter estimates at bounds
+# delta, kappa, and EB models give many warnings of parameter estimates at bounds
 
 pt1 <- proc.time()
 nCore <- detectCores() - 1
 registerDoParallel(nCore)
-modsDfRdm <- foreach(trt = tipLrdm, .packages = 'geiger',
+modsDfRdm <- foreach(x = tipLrdm, .packages = 'geiger',
                      .combine = rbind, .inorder = FALSE) %dopar%
-  fitEvoMods(phy = phyTrim, trt = trt)
+  fitEvoMods(phy = phyTrim, m = x[['m']], err = x[['se']])
 stopImplicitCluster()
 pt2 <- proc.time()
 (pt2-pt1)/60 
