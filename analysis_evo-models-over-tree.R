@@ -16,6 +16,13 @@ day <- as.Date(date(), format="%a %b %d %H:%M:%S %Y")
 # set whether to run analyses on surface-level or in-habitat niches
 ss <- TRUE
 
+# set how many times to iterate the random sampling of tips
+nRdm <- 1000
+
+# whether to exclude super-densely-sampled 4 ka and 12 ka bins (TRUE) or not
+# this only applies to random tip sampling, which could mix good/bad sampled bins
+rdmAsOld <- TRUE
+
 # Format phylo ------------------------------------------------------------
 # this code chunk is copied from analysis_phylo_eco.R, ForamNiches repo
 
@@ -152,12 +159,14 @@ sampleTips <- function(pool, sppVect, binL){
   sapply(sppVect, getVal)
 }
 
-# set how many times to iterate the random sampling of tips:
-n <- 100
-
 # names (character) of time bins with available data to serve as tips
-# use whole time interval except for B digitata and G conglobatus
+# watch out for B digitata and G conglobatus - each unsampled in 1 bin
+# follow argument at script head - whether to exclude young, well-sampled bins
 tipPoolAll <- names(tipLall)
+if (rdmAsOld){
+  oldOnly <- ! tipPoolAll %in% c('4', '12')
+  tipPoolAll <- tipPoolAll[oldOnly]
+}
 tipPoolBd <- tipPoolAll[tipPoolAll != 156]
 tipPoolGc <- tipPoolAll[tipPoolAll != 52]
 
@@ -174,7 +183,7 @@ sampleAvlbTips <- function(restSpp, poolBd, poolGc, poolAll, binL){
   list('m' = sampMat[1,], 'se' = sampMat[2,])
 }
 
-tipLrdm <- replicate(n = n,
+tipLrdm <- replicate(n = nRdm,
                      sampleAvlbTips(restSpp = mostSpp,
                                     poolBd  = tipPoolBd,
                                     poolGc  = tipPoolGc,
@@ -304,13 +313,13 @@ pt2 <- proc.time()
 (pt2-pt1)/60 
 # delta, kappa, and EB models warn parameter estimates at bounds
 
-# ca 2 min runtime for 100 reps, 12 min/ 1000x, so save results to jump to plots
-if (ss){
-  rdmDfNm <- paste0('Figs/phylo-evo-model-wts_random-samp_', n, 'x_SS_',  day, '.csv')
-} else {
-  rdmDfNm <- paste0('Figs/phylo-evo-model-wts_random-samp_', n, 'x_hab_', day, '.csv')
-}
-write.csv(modsDfRdm, rdmDfNm, row.names = FALSE)
+# ca 2 min runtime for 100 reps, 12-15 min/ 1000x, so save results to jump to plots
+# if (ss){
+#   rdmDfNm <- paste0('Figs/phylo-evo-model-wts_random-samp_', nRdm, 'x_SS_',  day, '.csv')
+# } else {
+#   rdmDfNm <- paste0('Figs/phylo-evo-model-wts_random-samp_', nRdm, 'x_hab_', day, '.csv')
+# }
+# write.csv(modsDfRdm, rdmDfNm, row.names = FALSE)
 
 # Charts for chronological sampling ---------------------------------------
 
@@ -399,16 +408,22 @@ wtBox <- ggplot() +
   geom_boxplot(data = modsLongRdm,
                aes(x = Model, y = Weight),
                fill = colr) +
-  scale_y_continuous('Model support (AIC Weight)') +
+  scale_y_continuous('Model support (AICc Weight)') +
   theme(axis.title.x = element_blank()) +
   scale_colour_manual(name = element_blank(), values = colr,
                       aesthetics = 'fill', limits = (mods)
   )
+# TODO standardise y-scale for comparison between all-mods and old-mods vsns
 
-if (ss){
-  wtBoxNm <- paste0('Figs/phylo-evo-model-wts_random-samp_', n, 'x_SS_',  day, '.pdf')
+if (rdmAsOld){
+  wtBoxNm <- paste0('Figs/phylo-evo-model-wts_random-samp_', nRdm, 'x_oldOnly')
 } else {
-  wtBoxNm <- paste0('Figs/phylo-evo-model-wts_random-samp_', n, 'x_hab_', day, '.pdf')
+  wtBoxNm <- paste0('Figs/phylo-evo-model-wts_random-samp_', nRdm, 'x_allBins')
+}
+if (ss){
+  wtBoxNm <- paste0(wtBoxNm, '_SS_',   day, '.pdf')
+} else {
+  wtBoxNm <- paste0(wtBoxNm, '_hab_',  day, '.pdf')
 }
 pdf(wtBoxNm, width = 4, height = 3)
   wtBox
