@@ -183,18 +183,30 @@ tipLrdm <- replicate(n = n,
                      simplify = FALSE
                      )
 
-# Estimate params ---------------------------------------------------------
+# Evo model function ------------------------------------------------------
 
-fitEvoMods <- function(phy, m, err){
-  whFit     <- fitContinuous(phy, m, err, model = 'white')
-  brownFit  <- fitContinuous(phy, m, err, model = 'BM')
-  lambdaFit <- fitContinuous(phy, m, err, model = 'lambda')
-  deltaFit  <- fitContinuous(phy, m, err, model = 'delta')
-  kappaFit  <- fitContinuous(phy, m, err, model = 'kappa')
-  ouFit     <- fitContinuous(phy, m, err, model = 'OU')
-  ebFit     <- fitContinuous(phy, m, err, model = 'EB')
+# Output a list with multiple elements, for different results plots: 
+# dataframe of relative weights for all models (for stacked barplots)
+# parameter estimates and CI from lambda/delta/OU, to check model quality
+mods <- c('white', 'BM', 'lambda', 'delta', 'kappa', 'OU', 'EB')
+fitEvoMods <- function(phy, m, err, params = FALSE){
+  whFit     <- fitContinuous(phy, m, err, model = 'white',
+                             control = list(hessian = TRUE))
+  brownFit  <- fitContinuous(phy, m, err, model = 'BM',
+                             control = list(hessian = TRUE))
+  lambdaFit <- fitContinuous(phy, m, err, model = 'lambda',
+                             control = list(hessian = TRUE))
+  deltaFit  <- fitContinuous(phy, m, err, model = 'delta',
+                             control = list(hessian = TRUE))
+  kappaFit  <- fitContinuous(phy, m, err, model = 'kappa',
+                             control = list(hessian = TRUE))
+  ouFit     <- fitContinuous(phy, m, err, model = 'OU',
+                             control = list(hessian = TRUE))
+  ebFit     <- fitContinuous(phy, m, err, model = 'EB',
+                             control = list(hessian = TRUE))
   
-  # compare all models as AIC weights
+  # compare all models as AICc weights
+  # AICc instead of AIC to match internal decision of paleoTs::compareModels()
   modL <- list(white = whFit,
                BM = brownFit, 
                lambda = lambdaFit, 
@@ -203,23 +215,83 @@ fitEvoMods <- function(phy, m, err){
                OU = ouFit, 
                EB = ebFit
   )
-  getAic <- function(mod){ mod$opt$aic }
-  aicVect <- unlist(lapply(modL, getAic))
-  aicMin <- aicVect[which.min(aicVect)]
-  bestMod <- names(aicMin)
-  aicDelta <- aicVect - aicMin
-  relLik <- exp(-0.5 * aicDelta)
-  wts <- relLik/sum(relLik)
+  getAicc <- function(mod){ mod$opt$aicc }
+  aiccVect <- unlist(lapply(modL, getAicc))
+  aiccMin <- aiccVect[which.min(aiccVect)]
+#  bestMod <- names(aicMin)
+  aiccDelta <- aiccVect - aiccMin
+  relLik <- exp(-0.5 * aiccDelta)
+  wts <- relLik / sum(relLik)
+  smryDf <- data.frame(t(wts)) # data.frame(bestMod, t(wts))
+  # leave out character string (best model name) so data stay numeric in export
   
-  data.frame(bestMod, t(wts))
+  # return parameters when fcn applied to chron data, but not for random replicates
+  if (params == TRUE){
+    # paramBest <- modL[[bestMod]]$opt
+    # numParamBest <- Filter(is.numeric, paramBest)
+    whtn <- modL[['white' ]]$opt
+    lmda <- modL[['lambda']]$opt
+    dlta <- modL[['delta' ]]$opt
+    ornu <- modL[['OU'    ]]$opt
+    numWhtn <- Filter(is.numeric, whtn)
+    numLmda <- Filter(is.numeric, lmda)
+    numDlta <- Filter(is.numeric, dlta)
+    numOrnu <- Filter(is.numeric, ornu)
+    list(wts = smryDf,
+         # bestMod = unlist(numParamBest)
+         white  = unlist(numWhtn),
+         lambda = unlist(numLmda),
+         delta  = unlist(numDlta),
+         ou     = unlist(numOrnu)
+         )
+  } else {
+    smryDf
+  }
 }
-# fitEvoMods(phy = phyTrim, m = tipLchron[[10]][['m']], err = tipLchron[[10]][['se']]) # test
+# test <- fitEvoMods(phy = phyTrim, m = tipLchron[[10]][['m']], 
+#                    err = tipLchron[[10]][['se']], params = TRUE)
+
+# *Run models on chron data -----------------------------------------------
 
 modsLchron <- lapply(tipLchron, function(x){
-  fitEvoMods(phy = phyTrim, m = x[['m']], err = x[['se']])
+  fitEvoMods(phy = phyTrim, m = x[['m']], err = x[['se']], params = TRUE)
+})
+# only a min runtime
+
+# Reformat into separate dataframes for separate weight and estimate figures
+# There's surely a much tidier way to do this, soz reader
+
+getDf <- function(x) t(x$wts)
+modsDfM <- sapply(modsLchron, getDf)
+modsDfChron <- data.frame(t(modsDfM))
+colnames(modsDfChron) <- mods # c('bestMod', mods)
+# modsDfChron[, mods] <- apply(modsDfChron[, mods], 2, as.numeric)
+# TODO add column for best model?
+binsInPlot <- row.names(modsDfChron)
+modsDfChron$bin <- factor(binsInPlot, levels = rev(binsInPlot)) 
+# bins shouldn't be numeric since plotted as discrete axis
+# put in reverse order so will plot youngest to oldest from top to bottom
+
+# format parameter CI values - note not every run is able is calculate them
+confide <- function(mod, modsL){
+  paramsL <- lapply(modsL, function(x) x[[mod]])
+  # names(paramsL) <- binsInPlot
+  
+  # find the runs where CI is calculated
+  hasConf <- lapply(paramsL, function(x){
+    'CI1' %in% names(x)
   })
-modsDfChron <- do.call(rbind, modsLchron)
-# delta, kappa, and EB models give many warnings of parameter estimates at bounds
+  params2lookit <- paramsL[unlist(hasConf)]
+  paramsDf <- data.frame(do.call(rbind, params2lookit))
+  paramsDf$bin <- row.names(paramsDf)
+  return(paramsDf)
+}
+paramsWhtn <- confide(mod = 'white',  modsL = modsLchron)
+paramsLmda <- confide(mod = 'lambda', modsL = modsLchron)
+paramsDlta <- confide(mod = 'delta',  modsL = modsLchron) # no CIs at all D:
+paramsOrnu <- confide(mod = 'ou',     modsL = modsLchron)
+
+# *Run models on rndm-samp data -------------------------------------------
 
 pt1 <- proc.time()
 nCore <- detectCores() - 1
@@ -232,7 +304,7 @@ pt2 <- proc.time()
 (pt2-pt1)/60 
 # delta, kappa, and EB models warn parameter estimates at bounds
 
-# ca 2 min runtime for 100 reps, 17 min/ 1000x, so save results to jump to plots
+# ca 2 min runtime for 100 reps, 12 min/ 1000x, so save results to jump to plots
 if (ss){
   rdmDfNm <- paste0('Figs/phylo-evo-model-wts_random-samp_', n, 'x_SS_',  day, '.csv')
 } else {
@@ -240,31 +312,9 @@ if (ss){
 }
 write.csv(modsDfRdm, rdmDfNm, row.names = FALSE)
 
-# Phylogenetic Comparative Methods p. 91:
-# There are two main ways to assess the fit of the three Pagel-style models to data.
-# First, one can use ML to estimate parameters and likelihood ratio tests 
-# (or AICc scores) to compare the fit of various models. Each represents a three parameter
-# model: one additional parameter added to the two parameters already needed to
-# describe single-rate Brownian motion. As mentioned above, simulation studies
-# suggest that this can sometimes lead to overconfidence, at least for the lambda model.
-# Sometimes researchers will compare the fit of a particular model (e.g. lambda) with
-# models where that parameter is fixed at its two extreme values (0 or 1; this is not
-# possible with delta). Second, one can use Bayesian methods to estimate posterior
-# distributions of parameter values, then inspect those distributions to see if they
-# overlap with values of interest (say, 0 or 1).
-
-# fastAnc(phyFull, trait)
-
 # Charts for chronological sampling ---------------------------------------
 
 # stacked bar chart of support for each evo model, for each tip time step
-
-# plot youngest time step at top (strat order)
-# this means putting df in reverse order, to be flipped during xy rotation later
-mods <- colnames(modsDfChron)[-1]
-binsInPlot <- row.names(modsDfChron)
-modsDfChron$bin <- factor(binsInPlot, levels = rev(binsInPlot)) 
-# (bins shouldn't be numeric since plotted as discrete axis)
 
 modsLong <- pivot_longer(modsDfChron, cols = all_of(mods),
                          names_to = 'Model', values_to = 'Weight')
@@ -285,7 +335,7 @@ barStack <-
            ) +
   scale_x_discrete(name = 'Tip age (ka)',
                    labels = rev(binsInPlot)) +
-  scale_y_continuous(name = 'Model support (AIC weight)        ') +
+  scale_y_continuous(name = 'Model support (AICc weight)        ') +
 #                    expand = c(0, 0), limits = c(0, 1.2),
 #                    breaks = seq(0, 1, by = 0.25)) + # auto breaks in right posion
   theme(legend.position = 'top',
@@ -337,22 +387,6 @@ if (ss){
 # Charts for random sampling ----------------------------------------------
 
 # summarize weight for each model across all sampling iterations
-
-# plot as barplot
-# (problem: SD and SE dependent on n iterations, better to report quartiles)
-  # dfSumry <- function(x){
-  #   c(mean = mean(x, na.rm=TRUE),
-  #     sd = sd(x, na.rm=TRUE))
-  # }
-  # rdmAvgM <- ( apply(modsDfRdm[,-1], 2, dfSumry) )
-  # rdmAvgDf <- data.frame(t(rdmAvgM))
-  # rdmAvgDf$Model <- rownames(rdmAvgDf)
-
-  # barAvg <- ggplot(data = rdmAvgDf) +
-  #   theme_minimal() +
-  #   geom_col(aes(x = Model, y = mean)) +
-  #   geom_errorbar(aes(x = Model, ymin = mean - sd, ymax = mean + sd), 
-  #                 width = 0.2)
 
 modsLongRdm <- pivot_longer(modsDfRdm, cols = all_of(mods),
                             names_to = 'Model', values_to = 'Weight')
