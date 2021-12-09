@@ -2,6 +2,7 @@ library(ape)
 library(phytools)
 library(paleotree)
 library(geiger)
+library(pmc)
 library(parallel)
 library(foreach)
 library(iterators)
@@ -22,6 +23,9 @@ nRdm <- 1000
 # whether to exclude super-densely-sampled 4 ka and 12 ka bins (TRUE) or not
 # this only applies to random tip sampling, which could mix good/bad sampled bins
 rdmAsOld <- TRUE
+
+# number of Monte Carlo bootstrap replicates - default is 500, VERY slow
+nBoot <- 50
 
 # Format phylo ------------------------------------------------------------
 # this code chunk is copied from analysis_phylo_eco.R, ForamNiches repo
@@ -192,27 +196,53 @@ tipLrdm <- replicate(n = nRdm,
                      simplify = FALSE
                      )
 
-# Evo model function ------------------------------------------------------
+# Fit evo models ----------------------------------------------------------
+
+# 95% confidence interval based on MC bootstrapping, 
+# because Hessian-calculated CIs are junk and not even solvable for all models
+confide <- function(phy, m, err, mod, nboot){
+  # pmc fits 4 models:
+  # 'AA' fits model A on data obtained by simulations from model A,
+  # 'BA' fits model B on the data simulated from model A
+  # 'AB' fits model A on simulations from B
+  # 'BB' fits B on simulations from B
+  # So, by comparing a model with itself, both AA and BB replicates estimate the
+  # variable of interest and can be used to draw a CI. Halve computation time.
+  mcDat <- pmc(phy, m, mod, mod, 
+               nboot = nboot/2, mc.cores = 1,
+               optionsA = list(SE = err), # bounds = list(delta = c(min = exp(-500), max = 5))
+               optionsB = list(SE = err)
+  )
+  # there seems to be a bug in pmc with specifying the bounds argument 
+  # (fed to fitContinuous via optionsA or optionsB)
+  # e.g. when delta upper bound set to 5, observed estimate goes up to 5 
+  # but the upper 95% CI is still at the original default value, 3
+  
+  if (mod == 'OU'){
+    paramNm <- 'alpha'
+  } else {
+    paramNm <- mod
+  }
+  varRows <- mcDat$par_dists$comparison %in% c('AA', 'BB') & 
+    mcDat$par_dists$parameter == paramNm
+  bootEsts <- mcDat$par_dists$value[varRows]
+  ci <- quantile(bootEsts, c(0.025, 0.975))
+  varObs <- coef(mcDat[['A']])[[paramNm]]
+  c(observed = varObs, ci)
+}
 
 # Output a list with multiple elements, for different results plots: 
 # dataframe of relative weights for all models (for stacked barplots)
 # parameter estimates and CI from lambda/delta/OU, to check model quality
 mods <- c('white', 'BM', 'lambda', 'delta', 'kappa', 'OU', 'EB')
-fitEvoMods <- function(phy, m, err, params = FALSE){
-  whFit     <- fitContinuous(phy, m, err, model = 'white',
-                             control = list(hessian = TRUE))
-  brownFit  <- fitContinuous(phy, m, err, model = 'BM',
-                             control = list(hessian = TRUE))
-  lambdaFit <- fitContinuous(phy, m, err, model = 'lambda',
-                             control = list(hessian = TRUE))
-  deltaFit  <- fitContinuous(phy, m, err, model = 'delta',
-                             control = list(hessian = TRUE))
-  kappaFit  <- fitContinuous(phy, m, err, model = 'kappa',
-                             control = list(hessian = TRUE))
-  ouFit     <- fitContinuous(phy, m, err, model = 'OU',
-                             control = list(hessian = TRUE))
-  ebFit     <- fitContinuous(phy, m, err, model = 'EB',
-                             control = list(hessian = TRUE))
+fitEvoMods <- function(phy, m, err, params = FALSE, nBoot = 500){
+  whFit     <- fitContinuous(phy, m, err, model = 'white')
+  brownFit  <- fitContinuous(phy, m, err, model = 'BM')
+  lambdaFit <- fitContinuous(phy, m, err, model = 'lambda')
+  deltaFit  <- fitContinuous(phy, m, err, model = 'delta')
+  kappaFit  <- fitContinuous(phy, m, err, model = 'kappa')
+  ouFit     <- fitContinuous(phy, m, err, model = 'OU')
+  ebFit     <- fitContinuous(phy, m, err, model = 'EB')
   
   # compare all models as AICc weights
   # AICc instead of AIC to match internal decision of paleoTs::compareModels()
@@ -227,101 +257,65 @@ fitEvoMods <- function(phy, m, err, params = FALSE){
   getAicc <- function(mod){ mod$opt$aicc }
   aiccVect <- unlist(lapply(modL, getAicc))
   aiccMin <- aiccVect[which.min(aiccVect)]
-#  bestMod <- names(aicMin)
   aiccDelta <- aiccVect - aiccMin
   relLik <- exp(-0.5 * aiccDelta)
   wts <- relLik / sum(relLik)
-  smryDf <- data.frame(t(wts)) # data.frame(bestMod, t(wts))
-  # leave out character string (best model name) so data stay numeric in export
+  smryDf <- data.frame(t(wts))
   
-  # return parameters when fcn applied to chron data, but not for random replicates
+  # return parameter estimates when fcn is applied to chronological data, 
+  # but not for random-sampling replicates because that would take 5ever to run
   if (params == TRUE){
-    # paramBest <- modL[[bestMod]]$opt
-    # numParamBest <- Filter(is.numeric, paramBest)
-    whtn <- modL[['white' ]]$opt
-    lmda <- modL[['lambda']]$opt
-    dlta <- modL[['delta' ]]$opt
-    ornu <- modL[['OU'    ]]$opt
-    numWhtn <- Filter(is.numeric, whtn)
-    numLmda <- Filter(is.numeric, lmda)
-    numDlta <- Filter(is.numeric, dlta)
-    numOrnu <- Filter(is.numeric, ornu)
-    list(wts = smryDf,
-         # bestMod = unlist(numParamBest)
-         white  = unlist(numWhtn),
-         lambda = unlist(numLmda),
-         delta  = unlist(numDlta),
-         ou     = unlist(numOrnu)
-         )
+    lmdaEsts <- confide(phy, m = m, err = err, 'lambda', nBoot/2)
+    dltaEsts <- confide(phy, m = m, err = err, 'delta',  nBoot/2)
+    ornuEsts <- confide(phy, m = m, err = err, 'OU',     nBoot/2)
+    estsMat <- rbind('lambda' = lmdaEsts, 
+                     'delta' =  dltaEsts, 
+                     'alpha' =  ornuEsts)
+    list(wts = smryDf, ests = estsMat)
   } else {
     smryDf
   }
 }
 # test <- fitEvoMods(phy = phyTrim, m = tipLchron[[10]][['m']], 
-#                    err = tipLchron[[10]][['se']], params = TRUE)
-
-# *Run models on chron data -----------------------------------------------
-
-modsLchron <- lapply(tipLchron, function(x){
-  fitEvoMods(phy = phyTrim, m = x[['m']], err = x[['se']], params = TRUE)
-})
-# only a min runtime
-
-# Reformat into separate dataframes for separate weight and estimate figures
-# There's surely a much tidier way to do this, soz reader
-
-getDf <- function(x) t(x$wts)
-modsDfM <- sapply(modsLchron, getDf)
-modsDfChron <- data.frame(t(modsDfM))
-colnames(modsDfChron) <- mods # c('bestMod', mods)
-# modsDfChron[, mods] <- apply(modsDfChron[, mods], 2, as.numeric)
-# TODO add column for best model?
-binsInPlot <- row.names(modsDfChron)
-modsDfChron$bin <- factor(binsInPlot, levels = rev(binsInPlot)) 
-# bins shouldn't be numeric since plotted as discrete axis
-# put in reverse order so will plot youngest to oldest from top to bottom
-
-# format parameter CI values - note not every run is able is calculate them
-confide <- function(mod, modsL){
-  paramsL <- lapply(modsL, function(x) x[[mod]])
-  # names(paramsL) <- binsInPlot
-  
-  # find the runs where CI is calculated
-  hasConf <- lapply(paramsL, function(x){
-    'CI1' %in% names(x)
-  })
-  params2lookit <- paramsL[unlist(hasConf)]
-  paramsDf <- data.frame(do.call(rbind, params2lookit))
-  paramsDf$bin <- row.names(paramsDf)
-  return(paramsDf)
-}
-paramsWhtn <- confide(mod = 'white',  modsL = modsLchron)
-paramsLmda <- confide(mod = 'lambda', modsL = modsLchron)
-paramsDlta <- confide(mod = 'delta',  modsL = modsLchron) # no CIs at all D:
-paramsOrnu <- confide(mod = 'ou',     modsL = modsLchron)
-
-# *Run models on rndm-samp data -------------------------------------------
+#                    err = tipLchron[[10]][['se']], params = TRUE, nBoot = 50)
 
 pt1 <- proc.time()
 nCore <- detectCores() - 1
+registerDoParallel(nCore)
+modsLchron <- foreach(x = tipLchron, .packages = c('geiger', 'pmc'),
+                      .combine = rbind, .inorder = FALSE) %dopar%
+  fitEvoMods(phy = phyTrim, m = x[['m']], err = x[['se']], 
+             params = TRUE, nBoot = nBoot)
+stopImplicitCluster()
+pt2 <- proc.time()
+(pt2 - pt1) / 60
+# 35 min elapsed time for 50 replicates
+
+pt3 <- proc.time()
 registerDoParallel(nCore)
 modsDfRdm <- foreach(x = tipLrdm, .packages = 'geiger',
                      .combine = rbind, .inorder = FALSE) %dopar%
   fitEvoMods(phy = phyTrim, m = x[['m']], err = x[['se']])
 stopImplicitCluster()
-pt2 <- proc.time()
-(pt2-pt1)/60 
-# delta, kappa, and EB models warn parameter estimates at bounds
-
-# ca 2 min runtime for 100 reps, 12-15 min/ 1000x, so save results to jump to plots
-# if (ss){
-#   rdmDfNm <- paste0('Figs/phylo-evo-model-wts_random-samp_', nRdm, 'x_SS_',  day, '.csv')
-# } else {
-#   rdmDfNm <- paste0('Figs/phylo-evo-model-wts_random-samp_', nRdm, 'x_hab_', day, '.csv')
-# }
-# write.csv(modsDfRdm, rdmDfNm, row.names = FALSE)
+pt4 <- proc.time()
+(pt4 - pt3) / 60 
 
 # Charts for chronological sampling ---------------------------------------
+
+# reformat model output (list) into dataframes - here, containing AICc weights
+# there's surely a tidier way to do this, soz reader
+getDf <- function(x) t(x$wts)
+modsDfM <- sapply(modsLchron, getDf)
+modsDfChron <- data.frame(t(modsDfM))
+colnames(modsDfChron) <- mods
+bestPos <- apply(modsDfChron, 1, which.max)
+modsDfChron$bestMod <- mods[bestPos]
+binsInPlot <- row.names(modsDfChron)
+modsDfChron$bin <- factor(binsInPlot, levels = rev(binsInPlot)) 
+# bins shouldn't be numeric since plotted as discrete axis
+# put in reverse order so will plot youngest to oldest from top to bottom
+
+# *Stacked barplot --------------------------------------------------------
 
 # stacked bar chart of support for each evo model, for each tip time step
 
@@ -372,25 +366,58 @@ pdf(barNm, width = 4, height = 6)
   barStack
 dev.off()
 
+# *Akaike weights table ---------------------------------------------------
+
 # export the model support for each time bin as a suppl table:
 # some values are too similar to compare easily form the barplot alone
 
-# last column is the time bin identifier; use rownames instead to put it 1st
-wdthDf <- ncol(modsDfChron)
-
-chronTbl <- xtable(modsDfChron[,-wdthDf], align = rep('r', wdthDf), digits = 3,
-               caption = 'Trait evolution model weights by time bin')
+wts4tbl <- modsDfChron[, c('bin', 'bestMod', mods)]
+chronTbl <- xtable(wts4tbl, align = c('r', 'r', 'l', rep('r', length(mods))), 
+                   digits = 3,
+                   caption = 'Trait evolution model weights by time bin')
 if (ss){
   tblNm <- paste0('Figs/phylo-evo-model-wts_chron_SS_',  day, '.tex')
 } else {
   tblNm <- paste0('Figs/phylo-evo-model-wts_chron_hab_', day, '.tex')
 }
 if (ss){
-  print(chronTbl, file = tblNm, include.rownames = TRUE,
+  print(chronTbl, file = tblNm, include.rownames = FALSE,
         caption.placement = 'top')
 } else {
-  print(chronTbl, file = tblNm, include.rownames = TRUE,
+  print(chronTbl, file = tblNm, include.rownames = FALSE,
         caption.placement = 'top')
+}
+
+# *Param estimates --------------------------------------------------------
+
+# report CIs from bootstrapping the lambda, delta, and OU models
+
+for (paramNm in c('lambda','delta','alpha')){
+  getParam <- function(x) x$ests[paramNm,]
+  paramMat <- sapply(modsLchron, getParam)
+  paramDf <- data.frame(t(paramMat))
+  
+  if (paramNm == 'lambda'){ 
+    # estimates VERY close to zero, need sci notation
+    paramDf$observed <- formatC(paramDf$observed, format = "e", digits = 2)
+    paramDf$X2.5. <-    formatC(paramDf$X2.5.,    format = "e", digits = 2)
+    paramDf$X97.5. <- round(paramDf$X97.5, 3)
+  }
+  paramTbl <- xtable(paramDf, align = rep('r', 4), 
+                     digits = 3,
+                     caption = 'Estimate and bootstrapped CI')
+  if (ss){
+    outTblNm <- paste0('Figs/', paramNm, '_chron_SS_', nBoot, 'x_',  day, '.tex')
+  } else {
+    outTblNm <- paste0('Figs/', paramNm, '_chron_hab_', nBoot, 'x_', day, '.tex')
+  }
+  if (ss){
+    print(paramTbl, file = outTblNm, include.rownames = TRUE,
+          caption.placement = 'top')
+  } else {
+    print(paramTbl, file = outTblNm, include.rownames = TRUE,
+          caption.placement = 'top')
+  }
 }
 
 # Charts for random sampling ----------------------------------------------
