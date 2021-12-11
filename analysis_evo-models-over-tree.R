@@ -3,10 +3,12 @@ library(phytools)
 library(paleotree)
 library(geiger)
 library(pmc)
+library(pracma)
 library(parallel)
 library(foreach)
 library(iterators)
 library(doParallel)
+library(beepr)
 library(tidyr)
 library(ggplot2)
 library(RColorBrewer)
@@ -23,6 +25,9 @@ nRdm <- 1000
 # whether to exclude super-densely-sampled 4 ka and 12 ka bins (TRUE) or not
 # this only applies to random tip sampling, which could mix good/bad sampled bins
 rdmAsOld <- TRUE
+
+# which models to compare with AICc weights
+mods <- c('white', 'BM', 'lambda', 'delta', 'kappa', 'OU', 'EB')
 
 # number of Monte Carlo bootstrap replicates - default is 500, VERY slow
 nBoot <- 50
@@ -113,6 +118,9 @@ spp <- unique(df$sp)
 # drop tips not sampled in niche data
 phyTrim <- keep.tip(phyFull, spp)
 
+# rescale to height = 1 so alpha has standardised interpretation
+unitPhy <- geiger::rescale(phyTrim, 'depth', 1)
+
 # extract mean/SE occupied temperatures from a given time bin (e.g. most recent)
 # give data for all species that are available
 # print details of what isn't available, to be dealt with separately later
@@ -198,9 +206,26 @@ tipLrdm <- replicate(n = nRdm,
 
 # Fit evo models ----------------------------------------------------------
 
+# compare all models as AICc weights
+# AICc instead of AIC to match internal decision of paleoTs::compareModels()
+wait <- function(phy, m, err, mods){
+  nMod <- length(mods)
+  aiccVect <- vector(length = nMod)
+  for (i in 1:nMod){
+    mFit <- fitContinuous(phy, m, err, model = mods[i])
+    aiccVect[i] <- mFit$opt$aicc
+  }
+  
+  aiccDelta <- aiccVect - min(aiccVect)
+  relLik <- exp(-0.5 * aiccDelta)
+  wts <- relLik / sum(relLik)
+  names(wts) <- mods
+  data.frame(t(wts))
+}
+
 # 95% confidence interval based on MC bootstrapping, 
 # because Hessian-calculated CIs are junk and not even solvable for all models
-confide <- function(phy, m, err, mod, nboot){
+confide <- function(phy, m, err, mod, n){
   # pmc fits 4 models:
   # 'AA' fits model A on data obtained by simulations from model A,
   # 'BA' fits model B on the data simulated from model A
@@ -209,7 +234,7 @@ confide <- function(phy, m, err, mod, nboot){
   # So, by comparing a model with itself, both AA and BB replicates estimate the
   # variable of interest and can be used to draw a CI. Halve computation time.
   mcDat <- pmc(phy, m, mod, mod, 
-               nboot = nboot/2, mc.cores = 1,
+               nboot = n/2, mc.cores = 1,
                optionsA = list(SE = err), # bounds = list(delta = c(min = exp(-500), max = 5))
                optionsB = list(SE = err)
   )
@@ -231,38 +256,48 @@ confide <- function(phy, m, err, mod, nboot){
   c(observed = varObs, ci)
 }
 
+# estimate p-val of rejecting H0 and *power to test H0*
+powerUp <- function(phy, m, err, h0, h1, n){
+  h0vh1 <- pmc(phy, m, h0, h1, 
+               nboot = n, mc.cores = 1,
+               optionsA = list(SE = err),
+               optionsB = list(SE = err)
+  )
+  
+  
+  # test statistic estimated from observations
+  obsDlta <- h0vh1$lr
+  
+  # get approximating function for each distribution
+  densH0 <- density(h0vh1$null)
+  densH1 <- density(h0vh1$test)
+  funH0 <- approxfun(densH0$x, densH0$y)
+  funH1 <- approxfun(densH1$x, densH1$y)
+  
+  # p-val is fraction of simulated distribution falling above observed lik ratio
+  # i.e. probability of observing a value at least as high as seen, if H0 true
+  pVal <- pracma::integral(funH0, obsDlta, max(densH0$x))
+  
+  # power to reject H0 with 5% false positive rate =
+  # fraction of simulated distribution under H1 falling above 95% quant of H0
+  n95 <- quantile(h0vh1$null, 0.95)
+  # H1 distribution could be so far to LEFT of H0 the whole KDE of H1 is below q95
+  if (max(densH1$x) < n95){
+    pwr <- 0
+  } else {
+    pwr <- integral(funH1, n95, max(densH1$x))
+  }
+  
+  c(pVal = pVal, power = pwr)
+}
+
 # Output a list with multiple elements, for different results plots: 
 # dataframe of relative weights for all models (for stacked barplots)
 # parameter estimates and CI from lambda/delta/OU, to check model quality
-mods <- c('white', 'BM', 'lambda', 'delta', 'kappa', 'OU', 'EB')
-fitEvoMods <- function(phy, m, err, params = FALSE, nBoot = 500){
-  whFit     <- fitContinuous(phy, m, err, model = 'white')
-  brownFit  <- fitContinuous(phy, m, err, model = 'BM')
-  lambdaFit <- fitContinuous(phy, m, err, model = 'lambda')
-  deltaFit  <- fitContinuous(phy, m, err, model = 'delta')
-  kappaFit  <- fitContinuous(phy, m, err, model = 'kappa')
-  ouFit     <- fitContinuous(phy, m, err, model = 'OU')
-  ebFit     <- fitContinuous(phy, m, err, model = 'EB')
+fitEvoMods <- function(phy, m, err, mods, params = FALSE, nBoot = 500){
+  smryDf <- wait(phy, m, err, mods)
   
-  # compare all models as AICc weights
-  # AICc instead of AIC to match internal decision of paleoTs::compareModels()
-  modL <- list(white = whFit,
-               BM = brownFit, 
-               lambda = lambdaFit, 
-               delta = deltaFit,
-               kappa = kappaFit, 
-               OU = ouFit, 
-               EB = ebFit
-  )
-  getAicc <- function(mod){ mod$opt$aicc }
-  aiccVect <- unlist(lapply(modL, getAicc))
-  aiccMin <- aiccVect[which.min(aiccVect)]
-  aiccDelta <- aiccVect - aiccMin
-  relLik <- exp(-0.5 * aiccDelta)
-  wts <- relLik / sum(relLik)
-  smryDf <- data.frame(t(wts))
-  
-  # return parameter estimates when fcn is applied to chronological data, 
+  # return parameter estimates and power of test when fcn applied to chron data, 
   # but not for random-sampling replicates because that would take 5ever to run
   if (params == TRUE){
     lmdaEsts <- confide(phy, m = m, err = err, 'lambda', nBoot/2)
@@ -271,34 +306,40 @@ fitEvoMods <- function(phy, m, err, params = FALSE, nBoot = 500){
     estsMat <- rbind('lambda' = lmdaEsts, 
                      'delta' =  dltaEsts, 
                      'alpha' =  ornuEsts)
+    
+    p <- powerUp(phy, m = m, err = err, h0 = 'white', h1 = 'OU', n = nBoot)
+    smryDf$pVal  <- p['pVal']
+    smryDf$power <- p['power']
+    
     list(wts = smryDf, ests = estsMat)
   } else {
     smryDf
   }
 }
-# test <- fitEvoMods(phy = phyTrim, m = tipLchron[[10]][['m']], 
-#                    err = tipLchron[[10]][['se']], params = TRUE, nBoot = 50)
+# test <- fitEvoMods(phy = unitPhy, m = tipLchron[[10]][['m']], err = tipLchron[[10]][['se']],
+#                    mods = mods, params = TRUE, nBoot = 50)
 
+pkgs <- c('geiger', 'pmc', 'pracma')
 pt1 <- proc.time()
 nCore <- detectCores() - 1
 registerDoParallel(nCore)
-modsLchron <- foreach(x = tipLchron, .packages = c('geiger', 'pmc'),
-                      .combine = rbind, .inorder = FALSE) %dopar%
-  fitEvoMods(phy = phyTrim, m = x[['m']], err = x[['se']], 
-             params = TRUE, nBoot = nBoot)
+modsLchron <- foreach(x = tipLchron, .packages = pkgs) %dopar%
+  fitEvoMods(phy = unitPhy, m = x[['m']], err = x[['se']], 
+             mods = mods, params = TRUE, nBoot = nBoot)
 stopImplicitCluster()
 pt2 <- proc.time()
 (pt2 - pt1) / 60
-# 35 min elapsed time for 50 replicates
+beepr::beep()
 
 pt3 <- proc.time()
 registerDoParallel(nCore)
-modsDfRdm <- foreach(x = tipLrdm, .packages = 'geiger',
+modsDfRdm <- foreach(x = tipLrdm, .packages = pkgs,
                      .combine = rbind, .inorder = FALSE) %dopar%
-  fitEvoMods(phy = phyTrim, m = x[['m']], err = x[['se']])
+  fitEvoMods(phy = unitPhy, m = x[['m']], err = x[['se']], mods = mods)
 stopImplicitCluster()
 pt4 <- proc.time()
 (pt4 - pt3) / 60 
+beepr::beep()
 
 # Charts for chronological sampling ---------------------------------------
 
@@ -307,10 +348,10 @@ pt4 <- proc.time()
 getDf <- function(x) t(x$wts)
 modsDfM <- sapply(modsLchron, getDf)
 modsDfChron <- data.frame(t(modsDfM))
-colnames(modsDfChron) <- mods
-bestPos <- apply(modsDfChron, 1, which.max)
+colnames(modsDfChron) <- c(mods, 'pValWhite', 'power')
+bestPos <- apply(modsDfChron[,mods], 1, which.max)
 modsDfChron$bestMod <- mods[bestPos]
-binsInPlot <- row.names(modsDfChron)
+binsInPlot <- names(tipLchron)
 modsDfChron$bin <- factor(binsInPlot, levels = rev(binsInPlot)) 
 # bins shouldn't be numeric since plotted as discrete axis
 # put in reverse order so will plot youngest to oldest from top to bottom
@@ -371,7 +412,7 @@ dev.off()
 # export the model support for each time bin as a suppl table:
 # some values are too similar to compare easily form the barplot alone
 
-wts4tbl <- modsDfChron[, c('bin', 'bestMod', mods)]
+wts4tbl <- modsDfChron[, c('bin', mods, 'bestMod', 'pValWhite', 'power')]
 chronTbl <- xtable(wts4tbl, align = c('r', 'r', 'l', rep('r', length(mods))), 
                    digits = 3,
                    caption = 'Trait evolution model weights by time bin')
@@ -392,6 +433,7 @@ if (ss){
 
 # report CIs from bootstrapping the lambda, delta, and OU models
 
+# TODO use binsInPlot to make a bin column and use that instead of rownames
 for (paramNm in c('lambda','delta','alpha')){
   getParam <- function(x) x$ests[paramNm,]
   paramMat <- sapply(modsLchron, getParam)
