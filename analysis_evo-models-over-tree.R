@@ -79,12 +79,6 @@ nBoot <- 50
 
 phyFull <- readRDS('Data/Aze-tree-phylo-object.rds')
 
-# export figure for phylogeny of study species
-  # png('Figs/phylo_black.png', 
-  #     width = 7.5, height = 7.5, units = 'in', res = 300)
-  # plot.phylo(trTrim, main = '')
-  # dev.off()
-
 # Format trait data -------------------------------------------------------
 
 if (ss){
@@ -117,9 +111,6 @@ spp <- unique(df$sp)
 
 # drop tips not sampled in niche data
 phyTrim <- keep.tip(phyFull, spp)
-
-# rescale to height = 1 so alpha has standardised interpretation
-unitPhy <- geiger::rescale(phyTrim, 'depth', 1)
 
 # extract mean/SE occupied temperatures from a given time bin (e.g. most recent)
 # give data for all species that are available
@@ -245,6 +236,10 @@ confide <- function(phy, m, err, mod, n){
   
   if (mod == 'OU'){
     paramNm <- 'alpha'
+    
+    # rescale to height = 1 so alpha has standardised interpretation
+    # don't rescale tree elsewhere/for all models or it changes weighting (weird)
+    phy <- geiger::rescale(phy, 'depth', 1)
   } else {
     paramNm <- mod
   }
@@ -264,7 +259,6 @@ powerUp <- function(phy, m, err, h0, h1, n){
                optionsB = list(SE = err)
   )
   
-  
   # test statistic estimated from observations
   obsDlta <- h0vh1$lr
   
@@ -276,7 +270,17 @@ powerUp <- function(phy, m, err, h0, h1, n){
   
   # p-val is fraction of simulated distribution falling above observed lik ratio
   # i.e. probability of observing a value at least as high as seen, if H0 true
-  pVal <- pracma::integral(funH0, obsDlta, max(densH0$x))
+  # watch out: 
+  # H0 could be so far to RIGHT of observed test statistic the whole KDE is above it
+  # or a value >1 could result from integral estimate err: total prob can't exceed 1
+  if (min(densH0$x) > obsDlta){
+    pVal <- 1
+  } else {
+    pVal <- pracma::integral(funH0, obsDlta, max(densH0$x))
+    if (pVal > 1){
+      pVal <- 1
+    }
+  }
   
   # power to reject H0 with 5% false positive rate =
   # fraction of simulated distribution under H1 falling above 95% quant of H0
@@ -316,15 +320,15 @@ fitEvoMods <- function(phy, m, err, mods, params = FALSE, nBoot = 500){
     smryDf
   }
 }
-# test <- fitEvoMods(phy = unitPhy, m = tipLchron[[10]][['m']], err = tipLchron[[10]][['se']],
-#                    mods = mods, params = TRUE, nBoot = 50)
+# test <- fitEvoMods(phy = phyTrim, m = tipLchron[['28']][['m']], 
+#   err = tipLchron[['28']][['se']], mods = mods, params = TRUE, nBoot = 50)
 
 pkgs <- c('geiger', 'pmc', 'pracma')
 pt1 <- proc.time()
 nCore <- detectCores() - 1
 registerDoParallel(nCore)
 modsLchron <- foreach(x = tipLchron, .packages = pkgs) %dopar%
-  fitEvoMods(phy = unitPhy, m = x[['m']], err = x[['se']], 
+  fitEvoMods(phy = phyTrim, m = x[['m']], err = x[['se']], 
              mods = mods, params = TRUE, nBoot = nBoot)
 stopImplicitCluster()
 pt2 <- proc.time()
@@ -335,7 +339,7 @@ pt3 <- proc.time()
 registerDoParallel(nCore)
 modsDfRdm <- foreach(x = tipLrdm, .packages = pkgs,
                      .combine = rbind, .inorder = FALSE) %dopar%
-  fitEvoMods(phy = unitPhy, m = x[['m']], err = x[['se']], mods = mods)
+  fitEvoMods(phy = phyTrim, m = x[['m']], err = x[['se']], mods = mods)
 stopImplicitCluster()
 pt4 <- proc.time()
 (pt4 - pt3) / 60 
@@ -444,6 +448,12 @@ for (paramNm in c('lambda','delta','alpha')){
     paramDf$observed <- formatC(paramDf$observed, format = "e", digits = 2)
     paramDf$X2.5. <-    formatC(paramDf$X2.5.,    format = "e", digits = 2)
     paramDf$X97.5. <- round(paramDf$X97.5, 3)
+  }
+  if (paramNm == 'alpha'){
+    # Garland and Ives 2010, echoed by Cooper et al 2016:
+    # interpret -log(alpha) instead of alpha directly
+    # value of 4 is low, almost Brownian; value of -4 is high
+    paramDf <- -log10(paramDf)
   }
   paramTbl <- xtable(paramDf, align = rep('r', 4), 
                      digits = 3,
