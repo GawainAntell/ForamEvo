@@ -30,7 +30,11 @@ rdmAsOld <- TRUE
 mods <- c('white', 'BM', 'lambda', 'delta', 'kappa', 'OU', 'EB')
 
 # number of Monte Carlo bootstrap replicates - default is 500, VERY slow
-nBoot <- 50
+nBoot <- 500
+
+# should standard err in fitContinous be defined as SE of sampled means (TRUE)
+# or left unspecified to be estimated internally (FALSE)
+setErr <- FALSE
 
 # Format phylo ------------------------------------------------------------
 # this code chunk is copied from analysis_phylo_eco.R, ForamNiches repo
@@ -199,11 +203,11 @@ tipLrdm <- replicate(n = nRdm,
 
 # compare all models as AICc weights
 # AICc instead of AIC to match internal decision of paleoTs::compareModels()
-wait <- function(phy, m, err, mods){
+wait <- function(phy, m, mods, ...){
   nMod <- length(mods)
   aiccVect <- vector(length = nMod)
   for (i in 1:nMod){
-    mFit <- fitContinuous(phy, m, err, model = mods[i])
+    mFit <- fitContinuous(phy, dat = m, model = mods[i], ...)
     aiccVect[i] <- mFit$opt$aicc
   }
   
@@ -216,7 +220,7 @@ wait <- function(phy, m, err, mods){
 
 # 95% confidence interval based on MC bootstrapping, 
 # because Hessian-calculated CIs are junk and not even solvable for all models
-confide <- function(phy, m, err, mod, n){
+confide <- function(phy, m, mod, n, ...){
   # pmc fits 4 models:
   # 'AA' fits model A on data obtained by simulations from model A,
   # 'BA' fits model B on the data simulated from model A
@@ -226,8 +230,8 @@ confide <- function(phy, m, err, mod, n){
   # variable of interest and can be used to draw a CI. Halve computation time.
   mcDat <- pmc(phy, m, mod, mod, 
                nboot = n/2, mc.cores = 1,
-               optionsA = list(SE = err), # bounds = list(delta = c(min = exp(-500), max = 5))
-               optionsB = list(SE = err)
+               optionsA = list(...), # bounds = list(delta = c(min = exp(-500), max = 5))
+               optionsB = list(...)
   )
   # there seems to be a bug in pmc with specifying the bounds argument 
   # (fed to fitContinuous via optionsA or optionsB)
@@ -252,11 +256,11 @@ confide <- function(phy, m, err, mod, n){
 }
 
 # estimate p-val of rejecting H0 and *power to test H0*
-powerUp <- function(phy, m, err, h0, h1, n){
+powerUp <- function(phy, m, h0, h1, n, ...){
   h0vh1 <- pmc(phy, m, h0, h1, 
                nboot = n, mc.cores = 1,
-               optionsA = list(SE = err),
-               optionsB = list(SE = err)
+               optionsA = list(...),
+               optionsB = list(...)
   )
   
   # test statistic estimated from observations
@@ -298,20 +302,20 @@ powerUp <- function(phy, m, err, h0, h1, n){
 # Output a list with multiple elements, for different results plots: 
 # dataframe of relative weights for all models (for stacked barplots)
 # parameter estimates and CI from lambda/delta/OU, to check model quality
-fitEvoMods <- function(phy, m, err, mods, params = FALSE, nBoot = 500){
-  smryDf <- wait(phy, m, err, mods)
+fitEvoMods <- function(phy, m, mods, params = FALSE, nBoot = 500, ...){
+  smryDf <- wait(phy, m, mods, ...)
   
   # return parameter estimates and power of test when fcn applied to chron data, 
   # but not for random-sampling replicates because that would take 5ever to run
   if (params == TRUE){
-    lmdaEsts <- confide(phy, m = m, err = err, 'lambda', nBoot/2)
-    dltaEsts <- confide(phy, m = m, err = err, 'delta',  nBoot/2)
-    ornuEsts <- confide(phy, m = m, err = err, 'OU',     nBoot/2)
+    lmdaEsts <- confide(phy, m = m, 'lambda', nBoot/2, ...)
+    dltaEsts <- confide(phy, m = m, 'delta',  nBoot/2, ...)
+    ornuEsts <- confide(phy, m = m, 'OU',     nBoot/2, ...)
     estsMat <- rbind('lambda' = lmdaEsts, 
                      'delta' =  dltaEsts, 
                      'alpha' =  ornuEsts)
     
-    p <- powerUp(phy, m = m, err = err, h0 = 'white', h1 = 'OU', n = nBoot)
+    p <- powerUp(phy, m = m, h0 = 'white', h1 = 'OU', n = nBoot, ...)
     smryDf$pVal  <- p['pVal']
     smryDf$power <- p['power']
     
@@ -321,25 +325,39 @@ fitEvoMods <- function(phy, m, err, mods, params = FALSE, nBoot = 500){
   }
 }
 # test <- fitEvoMods(phy = phyTrim, m = tipLchron[['28']][['m']], 
-#   err = tipLchron[['28']][['se']], mods = mods, params = TRUE, nBoot = 50)
+#   mods = mods, params = TRUE, nBoot = 50) # SE = tipLchron[['28']][['se']]
 
 pkgs <- c('geiger', 'pmc', 'pracma')
 pt1 <- proc.time()
 nCore <- detectCores() - 1
 registerDoParallel(nCore)
-modsLchron <- foreach(x = tipLchron, .packages = pkgs) %dopar%
-  fitEvoMods(phy = phyTrim, m = x[['m']], err = x[['se']], 
-             mods = mods, params = TRUE, nBoot = nBoot)
+if (setErr){
+  modsLchron <- foreach(x = tipLchron, .packages = pkgs) %dopar%
+    fitEvoMods(phy = phyTrim, m = x[['m']], mods = mods, 
+               params = TRUE, nBoot = nBoot, SE = x[['se']])
+} else {
+  modsLchron <- foreach(x = tipLchron, .packages = pkgs) %dopar%
+    fitEvoMods(phy = phyTrim, m = x[['m']], mods = mods, 
+               params = TRUE, nBoot = nBoot)
+}
 stopImplicitCluster()
 pt2 <- proc.time()
 (pt2 - pt1) / 60
 beepr::beep()
+# user       system      elapsed 
+# 0.01133333   0.00650000 160.55466667
 
 pt3 <- proc.time()
 registerDoParallel(nCore)
-modsDfRdm <- foreach(x = tipLrdm, .packages = pkgs,
-                     .combine = rbind, .inorder = FALSE) %dopar%
-  fitEvoMods(phy = phyTrim, m = x[['m']], err = x[['se']], mods = mods)
+if (setErr){
+  modsDfRdm <- foreach(x = tipLrdm, .packages = pkgs,
+                       .combine = rbind, .inorder = FALSE) %dopar%
+    fitEvoMods(phy = phyTrim, m = x[['m']], mods = mods, SE = x[['se']])
+} else {
+  modsDfRdm <- foreach(x = tipLrdm, .packages = pkgs,
+                       .combine = rbind, .inorder = FALSE) %dopar%
+    fitEvoMods(phy = phyTrim, m = x[['m']], mods = mods)
+}
 stopImplicitCluster()
 pt4 <- proc.time()
 (pt4 - pt3) / 60 
@@ -402,10 +420,15 @@ barStack <-
                       ) +
   coord_flip()
 
-if (ss){
-  barNm <- paste0('Figs/phylo-evo-model-wts-barplot_SS_',  day, '.pdf')
+if (setErr){
+  barNm <- paste0('Figs/phylo-evo-model-wts-barplot_withSE')
 } else {
-  barNm <- paste0('Figs/phylo-evo-model-wts-barplot_hab_', day, '.pdf')
+  barNm <- paste0('Figs/phylo-evo-model-wts-barplot_dfltSE')
+}
+if (ss){
+  barNm <- paste0(barNm, '_SS_',  day, '.pdf')
+} else {
+  barNm <- paste0(barNm, '_hab_', day, '.pdf')
 }
 pdf(barNm, width = 4, height = 6)
   barStack
@@ -417,32 +440,31 @@ dev.off()
 # some values are too similar to compare easily form the barplot alone
 
 wts4tbl <- modsDfChron[, c('bin', mods, 'bestMod', 'pValWhite', 'power')]
-chronTbl <- xtable(wts4tbl, align = c('r', 'r', 'l', rep('r', length(mods))), 
+chronTbl <- xtable(wts4tbl, align = c(rep('r', length(mods)+2), 'l', 'r', 'r'), 
                    digits = 3,
                    caption = 'Trait evolution model weights by time bin')
-if (ss){
-  tblNm <- paste0('Figs/phylo-evo-model-wts_chron_SS_',  day, '.tex')
+if (setErr){
+  tblNm <- paste0('Figs/phylo-evo-model-wts_tbl_withSE')
 } else {
-  tblNm <- paste0('Figs/phylo-evo-model-wts_chron_hab_', day, '.tex')
+  tblNm <- paste0('Figs/phylo-evo-model-wts_tbl_dfltSE')
 }
 if (ss){
-  print(chronTbl, file = tblNm, include.rownames = FALSE,
-        caption.placement = 'top')
+  tblNm <- paste0(tblNm, '_SS_',  day, '.tex')
 } else {
-  print(chronTbl, file = tblNm, include.rownames = FALSE,
-        caption.placement = 'top')
+  tblNm <- paste0(tblNm, '_hab_', day, '.tex')
 }
+print(chronTbl, file = tblNm, include.rownames = FALSE,
+      caption.placement = 'top')
 
 # *Param estimates --------------------------------------------------------
 
 # report CIs from bootstrapping the lambda, delta, and OU models
 
-# TODO use binsInPlot to make a bin column and use that instead of rownames
 for (paramNm in c('lambda','delta','alpha')){
   getParam <- function(x) x$ests[paramNm,]
   paramMat <- sapply(modsLchron, getParam)
-  paramDf <- data.frame(t(paramMat))
-  
+  paramDf <- data.frame(bin = binsInPlot, t(paramMat))
+
   if (paramNm == 'lambda'){ 
     # estimates VERY close to zero, need sci notation
     paramDf$observed <- formatC(paramDf$observed, format = "e", digits = 2)
@@ -453,23 +475,24 @@ for (paramNm in c('lambda','delta','alpha')){
     # Garland and Ives 2010, echoed by Cooper et al 2016:
     # interpret -log(alpha) instead of alpha directly
     # value of 4 is low, almost Brownian; value of -4 is high
-    paramDf <- -log10(paramDf)
+    numCols <- c('observed','X2.5.','X97.5.')
+    paramDf[,numCols] <- -log10(paramDf[,numCols])
   }
-  paramTbl <- xtable(paramDf, align = rep('r', 4), 
+  paramTbl <- xtable(paramDf, align = rep('r', 5), 
                      digits = 3,
                      caption = 'Estimate and bootstrapped CI')
-  if (ss){
-    outTblNm <- paste0('Figs/', paramNm, '_chron_SS_', nBoot, 'x_',  day, '.tex')
+  if (setErr){
+    paramTblNm <- paste0('Figs/chron-param_', paramNm, '_withSE')
   } else {
-    outTblNm <- paste0('Figs/', paramNm, '_chron_hab_', nBoot, 'x_', day, '.tex')
+    paramTblNm <- paste0('Figs/chron-param_', paramNm, '_dfltSE')
   }
   if (ss){
-    print(paramTbl, file = outTblNm, include.rownames = TRUE,
-          caption.placement = 'top')
+    paramTblNm <- paste0(paramTblNm, '_SS_',  nBoot, 'x_', day, '.tex')
   } else {
-    print(paramTbl, file = outTblNm, include.rownames = TRUE,
-          caption.placement = 'top')
+    paramTblNm <- paste0(paramTblNm, '_hab_', nBoot, 'x_', day, '.tex')
   }
+  print(paramTbl, file = paramTblNm, include.rownames = FALSE,
+        caption.placement = 'top')
 }
 
 # Charts for random sampling ----------------------------------------------
