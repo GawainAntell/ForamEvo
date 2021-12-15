@@ -22,10 +22,6 @@ ss <- TRUE
 # set how many times to iterate the random sampling of tips
 nRdm <- 1000
 
-# whether to exclude super-densely-sampled 4 ka and 12 ka bins (TRUE) or not
-# this only applies to random tip sampling, which could mix good/bad sampled bins
-rdmAsOld <- TRUE
-
 # which models to compare with AICc weights
 mods <- c('white', 'BM', 'lambda', 'delta', 'kappa', 'OU', 'EB')
 
@@ -170,10 +166,6 @@ sampleTips <- function(pool, sppVect, binL){
 # watch out for B digitata and G conglobatus - each unsampled in 1 bin
 # follow argument at script head - whether to exclude young, well-sampled bins
 tipPoolAll <- names(tipLall)
-if (rdmAsOld){
-  oldOnly <- ! tipPoolAll %in% c('4', '12')
-  tipPoolAll <- tipPoolAll[oldOnly]
-}
 tipPoolBd <- tipPoolAll[tipPoolAll != 156]
 tipPoolGc <- tipPoolAll[tipPoolAll != 52]
 
@@ -362,6 +354,8 @@ stopImplicitCluster()
 pt4 <- proc.time()
 (pt4 - pt3) / 60 
 beepr::beep()
+#        user       system      elapsed 
+# 0.009166667  0.004666667 17.936666667
 
 # Charts for chronological sampling ---------------------------------------
 
@@ -497,6 +491,13 @@ for (paramNm in c('lambda','delta','alpha')){
 
 # Charts for random sampling ----------------------------------------------
 
+# tally the name of the best-supported models (as proportion of iterations)
+bestPosRdm <- apply(modsDfRdm, 1, which.max)
+bestRdm <- mods[bestPosRdm]
+sort(table(bestRdm) / nRdm, decreasing = TRUE)
+# white    OU    BM delta 
+# 0.944 0.023 0.020 0.013
+
 # summarize weight for each model across all sampling iterations
 
 modsLongRdm <- pivot_longer(modsDfRdm, cols = all_of(mods),
@@ -515,72 +516,12 @@ wtBox <- ggplot() +
   scale_colour_manual(name = element_blank(), values = colr,
                       aesthetics = 'fill', limits = (mods)
   )
-# TODO standardise y-scale for comparison between all-mods and old-mods vsns
 
-if (rdmAsOld){
-  wtBoxNm <- paste0('Figs/phylo-evo-model-wts_random-samp_', nRdm, 'x_oldOnly')
-} else {
-  wtBoxNm <- paste0('Figs/phylo-evo-model-wts_random-samp_', nRdm, 'x_allBins')
-}
 if (ss){
-  wtBoxNm <- paste0(wtBoxNm, '_SS_',   day, '.pdf')
+  wtBoxNm <- paste0('Figs/phylo-evo-model-wts_random-samp_', nRdm, 'x_SS_',  day, '.pdf')
 } else {
-  wtBoxNm <- paste0(wtBoxNm, '_hab_',  day, '.pdf')
+  wtBoxNm <- paste0('Figs/phylo-evo-model-wts_random-samp_', nRdm, 'x_hab_', day, '.pdf')
 }
 pdf(wtBoxNm, width = 4, height = 3)
   wtBox
 dev.off()
-
-# Example code ------------------------------------------------------------
-
-# copied and edited where necessary from function documentation
-# https://www.rdocumentation.org/packages/geiger/versions/1.2-06/topics/fitContinuous
-
-data(geospiza)
-attach(geospiza)
-
-#---- PRINT RESULTS
-fitContinuous(geospiza.tree, geospiza.data)
-
-#---- STORE RESULTS 
-brownFit <-  fitContinuous(geospiza.tree, geospiza.data)
-aic.brown<-numeric(5)
-# for(i in 1:5) aic.brown[i]<-brownFit[[i]]$aic # original line fails
-for(i in 1:5) aic.brown[i]<-brownFit[[i]]$opt$aic
-
-lambdaFit<-fitContinuous(geospiza.tree, geospiza.data, model="lambda")
-aic.lambda<-numeric(5)
-for(i in 1:5) aic.lambda[i]<-lambdaFit[[i]]$opt$aic # same edit as for BM
-
-deltaFit<-fitContinuous(geospiza.tree, geospiza.data, model="delta")
-aic.delta<-numeric(5)
-for(i in 1:5) aic.delta[i]<-deltaFit[[i]]$opt$aic
-
-kappaFit<-fitContinuous(geospiza.tree, geospiza.data, model="kappa")
-aic.kappa<-numeric(5)
-for(i in 1:5) aic.kappa[i]<-kappaFit[[i]]$opt$aic
-
-ouFit<-fitContinuous(geospiza.tree, geospiza.data, model="OU")
-aic.ou<-numeric(5)
-for(i in 1:5) aic.ou[i]<-ouFit[[i]]$opt$aic
-
-ebFit<-fitContinuous(geospiza.tree, geospiza.data, model="EB")
-aic.eb<-numeric(5)
-for(i in 1:5) aic.eb[i]<-ebFit[[i]]$opt$aic
-
-#   COMPARE ALL MODELS
-
-# One way: use likelihood ratio test to compare all models to Brownian model
-
-# Another way: use AIC
-
-aic.all<-cbind(aic.brown, aic.lambda, aic.delta, aic.kappa, aic.ou, aic.eb)
-foo<-function(x) x-x[which(x==min(x))]
-daic<-t(apply(aic.all, 1, foo))
-
-rownames(daic)<-colnames(geospiza.data)
-colnames(daic)<-c("Brownian", "Lambda", "Delta", "Kappa", "OU", "EB")
-
-cat("Table of delta-aic values; zero - best model")
-print(daic, digits=2)
-
