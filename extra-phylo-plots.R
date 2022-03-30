@@ -2,8 +2,13 @@ library('pmc')
 library('geiger')
 library('ouch')
 library('pracma')
+library('phytools')
+library('picante') # for plot.color.phylo
+library('RColorBrewer')
 library('ggplot2')
 library('cowplot')
+
+# Bootstrap dist concept --------------------------------------------------
 
 # replicate reported p-value and power from Boettiger et al. 2012
 # and plot a conceptual figure to show how they're derived
@@ -93,26 +98,66 @@ plotAll
 dev.off()
 
 
-# plot timescaled phylo ---------------------------------------------------
-# this code is notes on what to try; not run
+# Plot timescaled phylo ---------------------------------------------------
 
-# picante::color.plot.phylo
-# ape::plot.phylo
+spAttr <- read.csv('Data/foram-spp-data_2020-11-15.csv')
+df <- read.csv('Data/niche-sumry-metrics_SJ-ste_SS_2020-11-15.csv')
+df$sp <- gsub(' ', '_', df$sp)
+spAttr$species <- gsub(' ', '_', spAttr$species)
 
-# a projection of the tree in a space defined by phenotype (y axis) and time (on x)
-# phytools::phenogram
-# variant oto visualize the uncertainty around the reconstructed values at internal nodes
-# phytools::fancyTree type='phenogram95'
+phyFull <- readRDS('Data/Aze-tree-phylo-object.rds')
 
+# remove 2 species not in phylogeny
+toss <- name.check(phyFull, df$sp, data.names = df$sp)
+noPhy <- unique(toss$data_not_tree)
+paste(paste(noPhy, collapse = ' '), 'not in tree')
+if (length(noPhy) > 0){
+  rows2toss <- df$sp %in% noPhy
+  df <- df[!rows2toss,]
+}
+spp <- unique(df$sp)
 
-tree<-pbtree(b=0.03,d=0.01,n=200)
-#h<-max(nodeHeights(tree))
-plotTree(tree,plot=FALSE)
-# obj<-geo.legend(alpha=0.3,cex=1.2,plot=FALSE)
-# obj$leg<-h-obj$leg
-plotTree(tree,ftype="off",ylim=c(-0.2*Ntip(tree),Ntip(tree)),lwd=1)
+# drop tips not sampled in niche data
+phyTrim <- keep.tip(phyFull, spp)
+
+keepRows <- spAttr$species %in% spp
+spDf <- spAttr[keepRows,]
+
+# Combine with species attribute data
+# set open ocean thermocline species as the reference level
+spDf$eco <- factor(spDf$eco, levels=c(3,1,2,4,5))
+ecoLbl <- c('Thermocline','Mix layer symbiotic','Mix layer heterotroph',
+            'Subthermocline','High latitude')
+# From Aze et al. 2011, ecotype codes are:
+# 1 = open ocean, mixed layer, trop/subtrop, w symbionts
+# 2 = open ocean, mixed layer, trop/subtrop, w/o symbionts
+# 3 = open ocean, thermocline
+# 4 = open ocean, sub-thermocline
+# 5 = high lat
+# 6 = upwelling/high productivity
+code2habitat <- function(x){
+  switch(paste(x), 
+         '1' = 'Mix layer symbiotic', 
+         '2' = 'Mix layer heterotroph', 
+         '3' = 'Thermocline', 
+         '4' = 'Subthermocline', 
+         '5' = 'High latitude', 
+         'NA' = '-')
+} 
+spDf$ecoNm <- sapply(spDf$eco, code2habitat)
+spDf$ecoNm <- factor(spDf$ecoNm)
+
+# colorblind friendly diverging palette
+clrs <- brewer.pal(5, 'Set1')
+
+#pNm <- paste0('Figs/phylo-with-traits_',day,'.pdf')
+#pdf(pNm, width = 7.5, height = 7.5)
+color.plot.phylo(phyTrim, df = spDf, trait = 'ecoNm', taxa.names = 'species', 
+                 main = '', leg.title = 'Ecotype', col.names = clrs,
+                 x.lim = c(-70, 140),
+                 y.lim = c(-0.2*Ntip(phyTrim), Ntip(phyTrim)), # room for legend
+                 label.offset = 1
+                 )
 geo.legend()
-
-ggtree(unitTree) + 
-  theme_tree2()
-
+colors = rep('white',3)
+#dev.off()
